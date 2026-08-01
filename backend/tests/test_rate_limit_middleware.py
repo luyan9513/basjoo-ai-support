@@ -1,3 +1,6 @@
+import hashlib
+import logging
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -5,6 +8,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from middleware.rate_limit import RateLimitMiddleware, apply_cors_headers, should_apply_rate_limit
+from services.redis_service import RedisService
 
 
 class _DummyApp:
@@ -69,26 +73,191 @@ async def test_check_rate_limit_uses_memory_after_redis_failure(monkeypatch):
     assert middleware.use_redis is False
 
 
-def test_get_client_ip_prefers_first_forwarded_ip():
-    app = FastAPI()
-    middleware = RateLimitMiddleware(app, use_redis=False)
+@pytest.mark.asyncio
+async def test_check_rate_limit_disables_redis_after_runtime_failure(monkeypatch):
+    middleware = RateLimitMiddleware(
+        _DummyApp(), use_redis=True, requests_per_minute=3, burst_size=3
+    )
 
+    class FailingRedis:
+        async def check_rate_limit(self, *args, **kwargs):
+            raise RuntimeError("redis://user:secret@redis:6379 unavailable")
+
+    async def fake_get_redis():
+        return FailingRedis()
+
+    monkeypatch.setattr(middleware, "_get_redis", fake_get_redis)
+
+    allowed, remaining = await middleware._check_rate_limit("127.0.0.1")
+
+    assert allowed is True
+    assert remaining == 2
+    assert middleware.use_redis is False
+
+
+@pytest.mark.asyncio
+async def test_check_rate_limit_reports_redis_backend_on_success(monkeypatch):
+    middleware = RateLimitMiddleware(_DummyApp(), use_redis=True)
+
+    class HealthyRedis:
+        async def check_rate_limit(self, *args, **kwargs):
+            return False, 0
+
+    async def fake_get_redis():
+        return HealthyRedis()
+
+    monkeypatch.setattr(middleware, "_get_redis", fake_get_redis)
+
+    allowed, remaining, backend = await middleware._check_rate_limit_with_backend(
+        "127.0.0.1"
+    )
+
+    assert allowed is False
+    assert remaining == 0
+    assert backend == "redis"
+    assert middleware.use_redis is True
+
+
+def _request_with_client_and_headers(client_ip, headers):
+    app = FastAPI()
     scope = {
         "type": "http",
         "method": "GET",
         "path": "/",
-        "headers": [
-            (b"x-forwarded-for", b"203.0.113.10, 10.0.0.2, 10.0.0.3"),
-            (b"x-real-ip", b"198.51.100.7"),
-        ],
-        "client": ("172.17.0.1", 12345),
+        "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()],
+        "client": (client_ip, 12345),
         "query_string": b"",
         "scheme": "http",
         "server": ("testserver", 80),
+        "app": app,
     }
-    request = Request(scope)
+    return Request(scope)
+
+
+def test_get_client_ip_ignores_forwarded_headers_from_untrusted_peer():
+    middleware = RateLimitMiddleware(
+        FastAPI(), use_redis=False, trusted_proxy_cidrs="10.0.0.0/8"
+    )
+    request = _request_with_client_and_headers(
+        "198.51.100.7",
+        {
+            "X-Forwarded-For": "203.0.113.10",
+            "X-Real-IP": "203.0.113.11",
+        },
+    )
+
+    assert middleware._get_client_ip(request) == "198.51.100.7"
+
+
+def test_get_client_ip_accepts_forwarded_ip_from_trusted_proxy():
+    middleware = RateLimitMiddleware(
+        FastAPI(), use_redis=False, trusted_proxy_cidrs="172.16.0.0/12"
+    )
+    request = _request_with_client_and_headers(
+        "172.17.0.2", {"X-Forwarded-For": "203.0.113.10"}
+    )
 
     assert middleware._get_client_ip(request) == "203.0.113.10"
+
+
+def test_get_client_ip_walks_forwarded_chain_from_trusted_edge():
+    middleware = RateLimitMiddleware(
+        FastAPI(),
+        use_redis=False,
+        trusted_proxy_cidrs="10.0.0.0/8,172.16.0.0/12",
+    )
+    request = _request_with_client_and_headers(
+        "172.17.0.2",
+        {"X-Forwarded-For": "192.0.2.99, 203.0.113.10, 10.0.0.8"},
+    )
+
+    assert middleware._get_client_ip(request) == "203.0.113.10"
+
+
+def test_get_client_ip_falls_back_to_peer_for_malformed_forwarded_header():
+    middleware = RateLimitMiddleware(
+        FastAPI(), use_redis=False, trusted_proxy_cidrs="172.16.0.0/12"
+    )
+    request = _request_with_client_and_headers(
+        "172.17.0.2", {"X-Forwarded-For": "not-an-ip"}
+    )
+
+    assert middleware._get_client_ip(request) == "172.17.0.2"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_log_hashes_client_ip_and_records_backend(caplog):
+    app = FastAPI()
+
+    @app.get("/api/v1/chat")
+    async def ping():
+        return {"ok": True}
+
+    app.add_middleware(
+        RateLimitMiddleware,
+        requests_per_minute=1,
+        burst_size=1,
+        use_redis=False,
+    )
+    client_ip = "127.0.0.1"
+    expected_hash = hashlib.sha256(client_ip.encode()).hexdigest()[:12]
+
+    with caplog.at_level(logging.WARNING, logger="middleware.rate_limit"):
+        transport = ASGITransport(app=app, client=(client_ip, 12345))
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            await client.get("/api/v1/chat")
+            response = await client.get("/api/v1/chat")
+
+    assert response.status_code == 429
+    assert client_ip not in caplog.text
+    assert f"client_hash={expected_hash}" in caplog.text
+    assert "backend=memory" in caplog.text
+    assert "path=/api/v1/chat" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_redis_rate_limit_failure_is_not_silently_allowed(caplog):
+    service = object.__new__(RedisService)
+
+    class FailingPipeline:
+        def zremrangebyscore(self, *args):
+            return self
+
+        def zcard(self, *args):
+            return self
+
+        def zadd(self, *args):
+            return self
+
+        def expire(self, *args):
+            return self
+
+        async def execute(self):
+            raise RuntimeError("redis://user:secret@redis:6379 unavailable")
+
+    class FailingClient:
+        def pipeline(self):
+            return FailingPipeline()
+
+    service.client = FailingClient()
+
+    with caplog.at_level(logging.WARNING, logger="services.redis_service"):
+        with pytest.raises(RuntimeError):
+            await service.check_rate_limit("rate:ip:test", max_requests=3)
+
+    assert "secret" not in caplog.text
+
+
+def test_redis_initialization_log_does_not_expose_connection_url(monkeypatch, caplog):
+    redis_url = "redis://user:secret@redis:6379/0"
+    monkeypatch.setattr("services.redis_service.settings.redis_url", redis_url)
+
+    with caplog.at_level(logging.INFO, logger="services.redis_service"):
+        RedisService()
+
+    assert "Redis service initialized" in caplog.text
+    assert redis_url not in caplog.text
+    assert "secret" not in caplog.text
 
 
 def test_apply_cors_headers_echoes_allowed_origin(monkeypatch):

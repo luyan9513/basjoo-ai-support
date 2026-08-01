@@ -16,9 +16,6 @@ test.describe('Admin Authentication', () => {
   });
 
   test('login with valid credentials redirects to dashboard', async ({ page }) => {
-    await page.route('**/api/admin/login', async (route) => {
-      await route.continue({ headers: { ...route.request().headers(), 'X-Forwarded-For': '203.0.113.11' } });
-    });
     await page.goto('/login');
 
     // Login form inputs have no name attribute; use label text to find them
@@ -40,9 +37,6 @@ test.describe('Admin Authentication', () => {
   });
 
   test('refresh page preserves login state', async ({ page }) => {
-    await page.route('**/api/admin/login', async (route) => {
-      await route.continue({ headers: { ...route.request().headers(), 'X-Forwarded-For': '203.0.113.12' } });
-    });
     // Login first
     await page.goto('/login');
     await page.locator('input').first().fill(ADMIN_EMAIL);
@@ -62,9 +56,6 @@ test.describe('Admin Authentication', () => {
   });
 
   test('invalid credentials show error', async ({ page }) => {
-    await page.route('**/api/admin/login', async (route) => {
-      await route.continue({ headers: { ...route.request().headers(), 'X-Forwarded-For': '203.0.113.13' } });
-    });
     await page.goto('/login');
     await page.locator('input').first().fill(ADMIN_EMAIL);
     await page.locator('input').nth(1).fill('wrongpassword');

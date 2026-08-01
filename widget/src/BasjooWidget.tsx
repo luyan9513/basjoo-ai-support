@@ -3,6 +3,12 @@
  * 可嵌入的智能聊天组件
  */
 
+import {
+  formatAssistantMessage,
+  type WidgetReference,
+  type WidgetSource as Source,
+} from './citations';
+
 interface WidgetConfig {
   agentId: string;
   apiBase?: string;
@@ -29,19 +35,19 @@ interface ChatMessage {
   timestamp: Date;
 }
 
-interface Source {
-  type: 'url' | 'qa';
-  title?: string;
-  url?: string;
-  snippet?: string;
-  question?: string;
-  id?: string;
-}
-
 interface StreamDoneMeta {
   message_id?: number | null;
   session_id?: string;
   taken_over?: boolean;
+  handoff_requested?: boolean;
+}
+
+interface HandoffResponse {
+  success: boolean;
+  status: 'handoff_requested' | 'taken_over';
+  created: boolean;
+  message: string;
+  message_id?: number | null;
 }
 
 interface StreamErrorPayload {
@@ -60,61 +66,6 @@ interface ChatHistoryMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   sources?: Source[];
-}
-
-function formatAssistantMessage(content: string, sources: Source[] = []): { content: string; references: Array<{ title: string; url: string }> } {
-  if (!content) {
-    return { content, references: [] };
-  }
-
-  const references: Array<{ title: string; url: string }> = [];
-  const seenUrls = new Set<string>();
-  const sourceByUrl = new Map<string, Source & { type: 'url'; url: string }>();
-
-  for (const source of sources) {
-    if (source.type !== 'url' || typeof source.url !== 'string' || !/^https?:\/\//.test(source.url) || sourceByUrl.has(source.url)) {
-      continue;
-    }
-    sourceByUrl.set(source.url, source as Source & { type: 'url'; url: string });
-  }
-
-  const addReference = (url: string) => {
-    if (seenUrls.has(url)) {
-      return;
-    }
-    seenUrls.add(url);
-    const source = sourceByUrl.get(url);
-    references.push({
-      title: source?.title?.trim() || url,
-      url,
-    });
-  };
-
-  const formattedContent = content.replace(
-    /\[([^\]]+)\]\((#source-(\d+)|https?:\/\/[^\s)]+)\)/g,
-    (_match, label: string, target: string, sourceIndexText?: string) => {
-      if (sourceIndexText) {
-        const sourceIndex = Number(sourceIndexText) - 1;
-        const source = sources[sourceIndex];
-        if (source && source.type === 'url' && source.url && /^https?:\/\//.test(source.url)) {
-          addReference(source.url);
-        }
-        return label;
-      }
-
-      if (sourceByUrl.has(target)) {
-        addReference(target);
-        return label;
-      }
-
-      return _match;
-    },
-  );
-
-  return {
-    content: formattedContent,
-    references,
-  };
 }
 
 const AUTO_INIT_SCRIPT_PARAM_MAP = {
@@ -196,7 +147,7 @@ class StorageAdapter {
   }
 }
 
-class BasjooWidget {
+export class BasjooWidget {
   private config: Required<WidgetConfig>;
   private readonly hasTitleOverride: boolean;
   private readonly hasWelcomeMessageOverride: boolean;
@@ -218,6 +169,8 @@ class BasjooWidget {
   private pollIntervalId: number | null = null;
   private lastMessageId: number = 0;
   private isSending = false;
+  private handoffRequested = false;
+  private isRequestingHandoff = false;
   private streamAbortController: AbortController | null = null;
   private streamingMessage: HTMLDivElement | null = null;
   private streamingMessageContent: HTMLDivElement | null = null;
@@ -232,6 +185,7 @@ class BasjooWidget {
   private _closeBtnClickListener: (() => void) | null = null;
   private _sendBtnClickListener: (() => void) | null = null;
   private _inputKeypressListener: ((e: KeyboardEvent) => void) | null = null;
+  private _handoffClickListener: (() => void) | null = null;
 
   constructor(config: WidgetConfig) {
     const apiBase = this.detectApiBase(config.apiBase);
@@ -814,6 +768,50 @@ class BasjooWidget {
         border-bottom-left-radius: 4px;
       }
 
+      #basjoo-widget-container .basjoo-references {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid ${borderColor};
+      }
+
+      #basjoo-widget-container .basjoo-references-title {
+        margin-bottom: 8px;
+        color: ${mutedColor};
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      #basjoo-widget-container .basjoo-reference-card {
+        display: block;
+        padding: 8px 10px;
+        border: 1px solid ${borderColor};
+        border-radius: 8px;
+        background: ${inputBg};
+        color: ${textColor};
+        text-decoration: none;
+      }
+
+      #basjoo-widget-container .basjoo-reference-card + .basjoo-reference-card {
+        margin-top: 6px;
+      }
+
+      #basjoo-widget-container .basjoo-reference-name {
+        font-size: 12px;
+        font-weight: 600;
+        word-break: break-word;
+      }
+
+      #basjoo-widget-container .basjoo-reference-snippet {
+        margin-top: 4px;
+        color: ${mutedColor};
+        font-size: 11px;
+        line-height: 1.45;
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+      }
+
       #basjoo-widget-container .basjoo-message-error .basjoo-message-content {
         background: ${errorBg};
         color: ${isDark ? '#fca5a5' : '#dc2626'};
@@ -866,6 +864,30 @@ class BasjooWidget {
         gap: 12px;
         background: ${bgColor};
         flex-shrink: 0;
+      }
+
+      .basjoo-handoff {
+        min-width: 64px;
+        height: 40px;
+        margin: 4px 0 8px;
+        padding: 0 10px;
+        border: 1px solid ${this.config.themeColor};
+        border-radius: 20px;
+        background: transparent;
+        color: ${this.config.themeColor};
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+        flex-shrink: 0;
+      }
+
+      .basjoo-handoff:hover:not(:disabled) {
+        background: ${this.hexToRgba(this.config.themeColor, 0.1)};
+      }
+
+      .basjoo-handoff:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
       }
 
       .basjoo-input {
@@ -1085,6 +1107,7 @@ class BasjooWidget {
     const safeLogoUrl = this.config.logoUrl ? this.sanitizeUrlAttribute(this.config.logoUrl) : '';
     const safeTitle = this.escapeHtml(this.config.title);
     const safePlaceholder = this.escapeHtml(this.getText('inputPlaceholder'));
+    const safeHandoffLabel = this.escapeHtml(this.getText('handoffButton'));
 
     this.chatWindow.innerHTML = `
       <div class="basjoo-header">
@@ -1101,6 +1124,7 @@ class BasjooWidget {
       </div>
       <div class="basjoo-messages"></div>
       <div class="basjoo-input-area">
+        <button type="button" class="basjoo-handoff" disabled>${safeHandoffLabel}</button>
         <input type="text" class="basjoo-input" placeholder="${safePlaceholder}" maxlength="2000">
         <button class="basjoo-send">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1117,6 +1141,13 @@ class BasjooWidget {
 
     const input = this.chatWindow.querySelector('.basjoo-input') as HTMLInputElement;
     const sendBtn = this.chatWindow.querySelector('.basjoo-send') as HTMLButtonElement;
+    const handoffBtn = this.chatWindow.querySelector('.basjoo-handoff') as HTMLButtonElement;
+
+    this._handoffClickListener = () => {
+      void this.requestHumanHandoff();
+    };
+    handoffBtn.addEventListener('click', this._handoffClickListener);
+    this.updateHandoffButton();
 
     this._sendBtnClickListener = () => {
       if (this.isSending) {
@@ -1182,12 +1213,16 @@ class BasjooWidget {
   /**
    * Get localized text based on language setting
    */
-  private getText(key: 'sendFailed' | 'networkError' | 'quotaExceeded' | 'takenOverNotice' | 'inputPlaceholder' | 'messageTooLong' | 'greetingBubble' | 'newMessage' | 'thinking' | 'references'): string {
+  private getText(key: 'sendFailed' | 'networkError' | 'quotaExceeded' | 'takenOverNotice' | 'handoffPendingNotice' | 'handoffButton' | 'handoffRequestedButton' | 'handoffFailed' | 'inputPlaceholder' | 'messageTooLong' | 'greetingBubble' | 'newMessage' | 'thinking' | 'references'): string {
     const texts: Record<string, Record<string, string>> = {
       sendFailed: { 'en-US': 'Send failed, please try again later', 'zh-CN': '发送失败，请稍后重试' },
       networkError: { 'en-US': 'Network connection failed, please check your connection', 'zh-CN': '网络连接失败，请检查网络' },
       quotaExceeded: { 'en-US': 'Daily message limit reached', 'zh-CN': '今日消息已达上限' },
       takenOverNotice: { 'en-US': 'Your conversation has been transferred to a human agent. Please wait for their reply.', 'zh-CN': '已转接人工客服，请等待回复。' },
+      handoffPendingNotice: { 'en-US': 'Your request for a human agent has been received. Please wait for assistance.', 'zh-CN': '已收到你的人工客服请求，请稍候，我们会尽快处理。' },
+      handoffButton: { 'en-US': 'Human', 'zh-CN': '转人工' },
+      handoffRequestedButton: { 'en-US': 'Requested', 'zh-CN': '已请求' },
+      handoffFailed: { 'en-US': 'Failed to request a human agent. Please try again.', 'zh-CN': '请求人工客服失败，请重试。' },
       inputPlaceholder: { 'en-US': 'Type your question...', 'zh-CN': '输入您的问题...' },
       messageTooLong: { 'en-US': 'Message too long (max 2000 characters)', 'zh-CN': '消息过长（最多2000字符）' },
       greetingBubble: { 'en-US': 'Hi! How can I help you?', 'zh-CN': '你好！有什么可以帮您？' },
@@ -1219,10 +1254,15 @@ class BasjooWidget {
    * Only allows http/https URLs and strips anything else.
    */
   private sanitizeUrlAttribute(url: string): string {
+    const safeUrl = this.getSafeHttpUrl(url);
+    return safeUrl ? this.escapeHtml(safeUrl) : '';
+  }
+
+  private getSafeHttpUrl(url: string): string {
     try {
       const parsed = new URL(url);
       if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-        return this.escapeHtml(url);
+        return url;
       }
     } catch { /* invalid URL */ }
     return '';
@@ -1309,6 +1349,51 @@ class BasjooWidget {
     element.innerHTML = this.renderMarkdown(content) + (includeCursor ? '<span class="basjoo-stream-cursor"></span>' : '');
   }
 
+  private createReferenceList(references: WidgetReference[]): HTMLDivElement | null {
+    if (references.length === 0) {
+      return null;
+    }
+
+    const container = document.createElement('div');
+    container.className = 'basjoo-references';
+
+    const heading = document.createElement('div');
+    heading.className = 'basjoo-references-title';
+    heading.textContent = this.getText('references');
+    container.appendChild(heading);
+
+    for (const [index, reference] of references.entries()) {
+      const card = reference.type === 'url' ? document.createElement('a') : document.createElement('div');
+      card.className = 'basjoo-reference-card';
+
+      if (card instanceof HTMLAnchorElement && reference.url) {
+        const safeUrl = this.getSafeHttpUrl(reference.url);
+        if (!safeUrl) {
+          continue;
+        }
+        card.href = safeUrl;
+        card.target = '_blank';
+        card.rel = 'noopener noreferrer';
+      }
+
+      const name = document.createElement('div');
+      name.className = 'basjoo-reference-name';
+      name.textContent = `${index + 1}. ${reference.type === 'file' ? '📄' : '↗'} ${reference.title}`;
+      card.appendChild(name);
+
+      if (reference.snippet) {
+        const snippet = document.createElement('div');
+        snippet.className = 'basjoo-reference-snippet';
+        snippet.textContent = reference.snippet;
+        card.appendChild(snippet);
+      }
+
+      container.appendChild(card);
+    }
+
+    return container.childElementCount > 1 ? container : null;
+  }
+
   private createMessageElement(message: ChatMessage): HTMLDivElement {
     const messageDiv = document.createElement('div');
     messageDiv.className = `basjoo-message basjoo-message-${message.role}`;
@@ -1318,10 +1403,11 @@ class BasjooWidget {
 
     if (message.role === 'assistant') {
       const formattedMessage = formatAssistantMessage(message.content, message.sources);
-      const referenceMarkdown = formattedMessage.references.length > 0
-        ? `\n\n**${this.getText('references')}**\n${formattedMessage.references.map((reference) => `- [${reference.title}](${reference.url})`).join('\n')}`
-        : '';
-      this.updateMessageContent(contentDiv, formattedMessage.content + referenceMarkdown);
+      this.updateMessageContent(contentDiv, formattedMessage.content);
+      const referenceList = this.createReferenceList(formattedMessage.references);
+      if (referenceList) {
+        contentDiv.appendChild(referenceList);
+      }
     } else {
       this.updateMessageContent(contentDiv, message.content);
     }
@@ -1457,15 +1543,15 @@ class BasjooWidget {
     cursor?.remove();
     this.currentStreamSources = sources;
     const formattedMessage = formatAssistantMessage(this.currentStreamContent, sources);
-    const referenceMarkdown = formattedMessage.references.length > 0
-      ? `\n\n**${this.getText('references')}**\n${formattedMessage.references.map((reference) => `- [${reference.title}](${reference.url})`).join('\n')}`
-      : '';
-    const finalContent = formattedMessage.content + referenceMarkdown;
-    this.updateMessageContent(this.streamingMessageContent, finalContent);
+    this.updateMessageContent(this.streamingMessageContent, formattedMessage.content);
+    const referenceList = this.createReferenceList(formattedMessage.references);
+    if (referenceList) {
+      this.streamingMessageContent.appendChild(referenceList);
+    }
 
     this.messages.push({
       role: 'assistant',
-      content: finalContent,
+      content: this.currentStreamContent,
       sources,
       timestamp: new Date(),
     });
@@ -1570,6 +1656,62 @@ class BasjooWidget {
     }
   }
 
+  private updateHandoffButton() {
+    const button = this.chatWindow?.querySelector('.basjoo-handoff') as HTMLButtonElement | null;
+    if (!button) return;
+    button.textContent = this.getText(
+      this.handoffRequested ? 'handoffRequestedButton' : 'handoffButton',
+    );
+    button.disabled = !this.sessionId
+      || this.handoffRequested
+      || this.isSending
+      || this.isRequestingHandoff;
+  }
+
+  private async requestHumanHandoff() {
+    if (!this.sessionId || this.handoffRequested || this.isRequestingHandoff || this.isSending) {
+      return;
+    }
+
+    this.isRequestingHandoff = true;
+    this.updateHandoffButton();
+    try {
+      const response = await fetch(`${this.config.apiBase}/api/v1/chat/handoff`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agent_id: this.config.agentId,
+          session_id: this.sessionId,
+          visitor_id: this.visitorId,
+          locale: this.getRequestLocale(),
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const result = await response.json() as HandoffResponse;
+      this.handoffRequested = true;
+      if (typeof result.message_id === 'number' && result.message_id > this.lastMessageId) {
+        this.lastMessageId = result.message_id;
+      }
+      if (result.created && result.message) {
+        this.addMessage({
+          role: 'assistant',
+          content: result.message,
+          timestamp: new Date(),
+        });
+      }
+      this.startPolling();
+    } catch (error) {
+      console.error('[Basjoo Widget] Failed to request human handoff:', error);
+      this.showError(this.getText('handoffFailed'));
+    } finally {
+      this.isRequestingHandoff = false;
+      this.updateHandoffButton();
+    }
+  }
+
   /**
    * 轮询拉取新消息
    */
@@ -1671,17 +1813,31 @@ class BasjooWidget {
             this.sessionId = donePayload.session_id;
             this.storage.setItem(this.STORAGE_KEY, donePayload.session_id);
             this.startPolling();
+            this.updateHandoffButton();
           }
           if (typeof donePayload.message_id === 'number' && donePayload.message_id > this.lastMessageId) {
             this.lastMessageId = donePayload.message_id;
           }
           if (donePayload.taken_over) {
+            this.handoffRequested = true;
+            this.updateHandoffButton();
             this.removeStreamingMessage();
             this.addMessage({
               role: 'assistant',
               content: this.getText('takenOverNotice'),
               timestamp: new Date(),
             });
+          } else if (donePayload.handoff_requested) {
+            this.removeStreamingMessage();
+            if (!this.handoffRequested) {
+              this.addMessage({
+                role: 'assistant',
+                content: this.getText('handoffPendingNotice'),
+                timestamp: new Date(),
+              });
+            }
+            this.handoffRequested = true;
+            this.updateHandoffButton();
           } else {
             this.finalizeStreamingMessage(this.currentStreamSources);
             if (!this.isOpen) {
@@ -1857,6 +2013,7 @@ class BasjooWidget {
     }
 
     this.isSending = true;
+    this.updateHandoffButton();
 
     this.addMessage({
       role: 'user',
@@ -1901,6 +2058,7 @@ class BasjooWidget {
       this.showError(errorMessage);
     } finally {
       this.isSending = false;
+      this.updateHandoffButton();
     }
   }
 
@@ -1932,6 +2090,10 @@ class BasjooWidget {
     const input = this.chatWindow?.querySelector('.basjoo-input') as HTMLInputElement | null;
     if (input && this._inputKeypressListener) {
       input.removeEventListener('keypress', this._inputKeypressListener);
+    }
+    const handoffBtn = this.chatWindow?.querySelector('.basjoo-handoff') as HTMLButtonElement | null;
+    if (handoffBtn && this._handoffClickListener) {
+      handoffBtn.removeEventListener('click', this._handoffClickListener);
     }
 
     this.container?.remove();

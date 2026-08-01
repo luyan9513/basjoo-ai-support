@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     default_rate_limit: int = 100
     rate_limit_per_minute: int = 1000
     rate_limit_burst_size: int = 200
+    # Comma-separated proxy networks allowed to supply forwarded client IP headers.
+    # Empty by default so direct deployments fail closed.
+    trusted_proxy_cidrs: str = ""
 
     # Login rate limit
     login_rate_limit_max_attempts: int = 5

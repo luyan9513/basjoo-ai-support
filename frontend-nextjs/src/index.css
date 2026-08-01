@@ -165,6 +165,37 @@
   --sidebar-user-bg: hsla(210deg, 15%, 92%, 0.6);
 }
 
+/* ==================== Markdown ==================== */
+.markdown-renderer :not(pre) > code {
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-glass);
+  color: var(--color-text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.markdown-renderer pre {
+  overflow-x: auto;
+  margin: 0 0 0.75rem 0;
+  padding: 0.875rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  line-height: 1.6;
+}
+
+.markdown-renderer pre code {
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
 /* ==================== Reset & Base ==================== */
 *,
 *::before,

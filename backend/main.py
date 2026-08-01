@@ -19,6 +19,7 @@ from services.scheduler import (
 )
 from services.redis_service import get_redis, close_redis
 from middleware import RateLimitMiddleware, apply_cors_headers, get_request_client_ip
+from middleware.rate_limit import hash_client_ip
 from middleware.rate_limit import apply_cors_headers as apply_early_cors_headers
 from i18n.core import I18nMiddleware
 
@@ -124,6 +125,7 @@ app.add_middleware(
     RateLimitMiddleware,
     requests_per_minute=settings.rate_limit_per_minute,
     burst_size=settings.rate_limit_burst_size,
+    trusted_proxy_cidrs=settings.trusted_proxy_cidrs,
 )
 
 
@@ -154,8 +156,9 @@ async def log_requests(request, call_next):
             max_size = DEFAULT_BODY_SIZE_LIMIT
         if content_length > max_size:
             logger.warning(
-                f"Request too large: {content_length} bytes from "
-                f"{get_request_client_ip(request)}"
+                "Request too large: %s bytes from client_hash=%s",
+                content_length,
+                hash_client_ip(get_request_client_ip(request)),
             )
             from fastapi.responses import JSONResponse
 

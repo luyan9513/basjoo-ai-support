@@ -32,7 +32,7 @@ class RedisService:
         )
         self.client = redis.Redis(connection_pool=self.pool)
 
-        logger.info(f"Redis service initialized: {self.redis_url}")
+        logger.info("Redis service initialized")
 
     async def close(self):
         """关闭 Redis 连接"""
@@ -171,10 +171,10 @@ class RedisService:
 
             return allowed, remaining
 
-        except Exception as e:
-            logger.error(f"Redis rate limit error: {e}")
-            # 出错时默认允许请求
-            return True, max_requests
+        except Exception:
+            # Let callers apply their local fallback; avoid logging connection URLs.
+            logger.warning("Redis rate limit backend unavailable")
+            raise
 
     async def get_rate_limit_info(
         self,

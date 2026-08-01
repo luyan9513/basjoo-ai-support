@@ -188,13 +188,33 @@ async def require_tenant_access(
     current_user: AdminUser = Depends(require_admin_or_super_admin),
     db: AsyncSession = Depends(get_db),
 ) -> str:
-    """Lightweight tenant check (exists + user context). Extend with membership later."""
+    """Require workspace ownership and, for admins, an Agent membership."""
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id required")
-    from models import Tenant
+    if not current_user.workspace_id:
+        raise HTTPException(status_code=404, detail="Tenant not found")
 
-    result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    from models import Agent, AgentMember, KnowledgeBase, Tenant
+
+    stmt = select(Tenant.id).where(
+        Tenant.id == tenant_id,
+        Tenant.workspace_id == current_user.workspace_id,
+    )
+    if current_user.role != "super_admin":
+        stmt = (
+            stmt.join(KnowledgeBase, KnowledgeBase.tenant_id == Tenant.id)
+            .join(Agent, Agent.kb_id == KnowledgeBase.id)
+            .join(
+                AgentMember,
+                (AgentMember.agent_id == Agent.id)
+                & (AgentMember.admin_user_id == current_user.id)
+                & (AgentMember.role == "admin"),
+            )
+        )
+
+    result = await db.execute(stmt.limit(1))
     if not result.scalar_one_or_none():
+        # Do not disclose whether a tenant exists outside the caller's scope.
         raise HTTPException(status_code=404, detail="Tenant not found")
     return tenant_id
 

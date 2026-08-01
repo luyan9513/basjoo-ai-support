@@ -9,6 +9,11 @@ import { render, screen } from "@testing-library/react";
 import ChatPanel from "../../src/components/ChatPanel";
 import type { Agent } from "../../src/components/ChatPanel";
 
+Object.defineProperty(Element.prototype, "scrollIntoView", {
+  configurable: true,
+  value: vi.fn(),
+});
+
 // Mock react-i18next
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -119,6 +124,38 @@ describe("ChatPanel Component", () => {
 
     const chatInput = screen.getByTestId("chat-message-input");
     expect(chatInput).toHaveAttribute("aria-label");
+  });
+
+  it("shows file source cards for completed assistant messages", () => {
+    render(
+      <ChatPanel
+        messages={[
+          {
+            role: "assistant",
+            content: "退款将在 3–5 个工作日到账。",
+            timestamp: new Date("2026-07-29T00:00:00Z"),
+            sources: [
+              {
+                type: "file",
+                filename: "04-payments.md",
+                doc_id: "doc-payments",
+                snippet: "PayPal 退款预计 3–5 个工作日到账。",
+              },
+            ],
+          },
+        ]}
+        input=""
+        isLoading={false}
+        isSettingsSaving={false}
+        agent={mockAgent}
+        onInputChange={() => {}}
+        onSendMessage={() => {}}
+        onClearChat={() => {}}
+      />
+    );
+
+    expect(screen.getByText("04-payments.md").closest("a")).toBeNull();
+    expect(screen.getByText("PayPal 退款预计 3–5 个工作日到账。")).toBeVisible();
   });
 });
 

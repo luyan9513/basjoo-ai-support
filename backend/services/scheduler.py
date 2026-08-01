@@ -347,7 +347,9 @@ class SessionAutoCloseScheduler:
 
                 result = await db.execute(
                     select(ChatSession).where(
-                        ChatSession.status.in_(["active", "taken_over"])
+                        ChatSession.status.in_(
+                            ["active", "handoff_requested", "taken_over"]
+                        )
                     )
                 )
                 sessions = result.scalars().all()

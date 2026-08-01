@@ -7,7 +7,309 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from services.kb_retrieval_service import KbRetrievalService
+from services.kb_retrieval_service import (
+    KbRetrievalService,
+    _apply_lexical_rescue,
+    _decompose_parallel_query,
+    _expand_cross_language_query,
+    _merge_decomposed_hits,
+    _select_diverse_hits,
+)
+
+
+def test_select_diverse_hits_prefers_one_chunk_per_document():
+    raw_hits = [
+        {"score": 0.90, "payload": {"doc_id": "d1", "filename": "1.md"}},
+        {"score": 0.89, "payload": {"doc_id": "d1", "filename": "1.md"}},
+        {"score": 0.88, "payload": {"doc_id": "d2", "filename": "2.md"}},
+        {"score": 0.87, "payload": {"doc_id": "d3", "filename": "3.md"}},
+        {"score": 0.86, "payload": {"doc_id": "d2", "filename": "2.md"}},
+        {"score": 0.85, "payload": {"doc_id": "d4", "filename": "4.md"}},
+        {"score": 0.84, "payload": {"doc_id": "d5", "filename": "5.md"}},
+    ]
+
+    selected = _select_diverse_hits(raw_hits, top_k=5, threshold=0.01)
+
+    assert [hit["payload"]["doc_id"] for hit in selected] == [
+        "d1",
+        "d2",
+        "d3",
+        "d4",
+        "d5",
+    ]
+
+
+def test_select_diverse_hits_fills_remaining_slots_in_original_rank_order():
+    raw_hits = [
+        {"score": 0.90, "payload": {"doc_id": "d1", "chunk_index": 0}},
+        {"score": 0.89, "payload": {"doc_id": "d1", "chunk_index": 1}},
+        {"score": 0.88, "payload": {"doc_id": "d2", "chunk_index": 0}},
+        {"score": 0.87, "payload": {"doc_id": "d2", "chunk_index": 1}},
+        {"score": 0.001, "payload": {"doc_id": "d3", "chunk_index": 0}},
+    ]
+
+    selected = _select_diverse_hits(raw_hits, top_k=4, threshold=0.01)
+
+    assert [
+        (hit["payload"]["doc_id"], hit["payload"]["chunk_index"])
+        for hit in selected
+    ] == [("d1", 0), ("d2", 0), ("d1", 1), ("d2", 1)]
+
+
+def test_select_diverse_hits_does_not_promote_low_score_documents():
+    raw_hits = [
+        {"score": 0.90, "payload": {"doc_id": "d1", "chunk_index": 0}},
+        {"score": 0.89, "payload": {"doc_id": "d1", "chunk_index": 1}},
+        {"score": 0.50, "payload": {"doc_id": "d2", "chunk_index": 0}},
+        {"score": 0.40, "payload": {"doc_id": "d3", "chunk_index": 0}},
+    ]
+
+    selected = _select_diverse_hits(raw_hits, top_k=3, threshold=0.01)
+
+    assert [
+        (hit["payload"]["doc_id"], hit["payload"]["chunk_index"])
+        for hit in selected
+    ] == [("d1", 0), ("d1", 1), ("d2", 0)]
+
+
+def test_lexical_rescue_promotes_exact_identifier_from_dense_candidates():
+    raw_hits = [
+        {"score": 0.90, "payload": {"doc_id": "d1", "chunk_index": 0, "text": "other"}},
+        {"score": 0.89, "payload": {"doc_id": "d2", "chunk_index": 0, "text": "other"}},
+        {"score": 0.88, "payload": {"doc_id": "d3", "chunk_index": 0, "text": "other"}},
+        {"score": 0.87, "payload": {"doc_id": "d4", "chunk_index": 0, "text": "other"}},
+        {"score": 0.86, "payload": {"doc_id": "d5", "chunk_index": 0, "text": "other"}},
+        {
+            "score": 0.40,
+            "payload": {
+                "doc_id": "products",
+                "chunk_index": 1,
+                "text": "产品编号：AST-X1-65",
+            },
+        },
+    ]
+    selected = raw_hits[:5]
+
+    rescued = _apply_lexical_rescue(
+        "AST-X1-65",
+        raw_hits,
+        selected,
+        top_k=5,
+        threshold=0.01,
+    )
+
+    assert rescued[0] is raw_hits[5]
+    assert len(rescued) == 5
+
+
+def test_lexical_rescue_promotes_complete_natural_language_phrase():
+    raw_hits = [
+        {
+            "score": 0.55,
+            "payload": {"doc_id": "returns", "chunk_index": 1, "text": "退货资料校验码"},
+        },
+        {
+            "score": 0.53,
+            "payload": {"doc_id": "support", "chunk_index": 1, "text": "人工服务资料校验码"},
+        },
+        {
+            "score": 0.51,
+            "payload": {"doc_id": "payment", "chunk_index": 1, "text": "支付资料校验码"},
+        },
+        {
+            "score": 0.44,
+            "payload": {"doc_id": "products", "chunk_index": 0, "text": "产品参数"},
+        },
+        {
+            "score": 0.43,
+            "payload": {"doc_id": "returns", "chunk_index": 0, "text": "退货政策"},
+        },
+        {
+            "score": 0.39,
+            "payload": {
+                "doc_id": "products",
+                "chunk_index": 1,
+                "text": "## 产品资料校验码\nPRODUCT-NOVA-65W-221",
+            },
+        },
+    ]
+    selected = raw_hits[:5]
+
+    rescued = _apply_lexical_rescue(
+        "产品资料校验码是什么？",
+        raw_hits,
+        selected,
+        top_k=5,
+        threshold=0.01,
+    )
+
+    assert rescued[0] is raw_hits[5]
+    assert len(rescued) == 5
+
+
+def test_lexical_rescue_keeps_dense_selection_without_strong_match():
+    raw_hits = [
+        {"score": 0.90, "payload": {"doc_id": "d1", "chunk_index": 0, "text": "first"}},
+        {"score": 0.80, "payload": {"doc_id": "d2", "chunk_index": 0, "text": "second"}},
+    ]
+    selected = raw_hits[:1]
+
+    rescued = _apply_lexical_rescue(
+        "这件商品适合什么场景？",
+        raw_hits,
+        selected,
+        top_k=1,
+        threshold=0.01,
+    )
+
+    assert rescued == selected
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_phrase"),
+    [
+        ("What is the product verification code?", "产品资料校验码"),
+        ("What is the shipping information verification code?", "配送资料校验码"),
+        ("What is the returns information validation code?", "退货资料校验码"),
+        ("What is the payment information verification code?", "支付资料校验码"),
+        (
+            "What is the human support information verification code?",
+            "人工服务资料校验码",
+        ),
+    ],
+)
+def test_expand_cross_language_query_adds_canonical_code_phrase(
+    query,
+    expected_phrase,
+):
+    expanded = _expand_cross_language_query(query)
+
+    assert expanded == f"{query} {expected_phrase}"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "What is the product ID for Aster X1?",
+        "How long is shipping to Germany?",
+        "产品资料校验码是什么？",
+    ],
+)
+def test_expand_cross_language_query_keeps_unrelated_queries_unchanged(query):
+    assert _expand_cross_language_query(query) == query
+
+
+def test_decompose_parallel_query_builds_one_query_per_requested_subject():
+    queries = _decompose_parallel_query(
+        "请列出产品、配送、退货、支付和人工服务五份资料各自的校验码。"
+    )
+
+    assert queries == [
+        "产品资料校验码",
+        "配送资料校验码",
+        "退货资料校验码",
+        "支付资料校验码",
+        "人工服务资料校验码",
+    ]
+
+
+def test_decompose_parallel_query_ignores_ordinary_single_intent_question():
+    assert _decompose_parallel_query("Aster X1 的质保期是多久？") == []
+
+
+def test_merge_decomposed_hits_keeps_one_document_from_each_subquery_first():
+    query_hits = [
+        [
+            {"score": 0.9, "payload": {"doc_id": "products", "chunk_index": 1}},
+            {"score": 0.8, "payload": {"doc_id": "shared", "chunk_index": 0}},
+        ],
+        [
+            {"score": 0.88, "payload": {"doc_id": "shipping", "chunk_index": 1}},
+            {"score": 0.8, "payload": {"doc_id": "shared", "chunk_index": 0}},
+        ],
+        [
+            {"score": 0.87, "payload": {"doc_id": "returns", "chunk_index": 1}},
+        ],
+    ]
+
+    merged = _merge_decomposed_hits(query_hits, top_k=3)
+
+    assert [hit["payload"]["doc_id"] for hit in merged] == [
+        "products",
+        "shipping",
+        "returns",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_decomposes_parallel_query_and_merges_target_documents():
+    mock_agent = MagicMock()
+    mock_agent.id = "agent_123"
+    mock_agent.kb_id = "kb_123"
+    mock_agent.similarity_threshold = 0.01
+
+    mock_kb = MagicMock()
+    mock_kb.id = "kb_123"
+    mock_kb.tenant_id = "tenant_123"
+    mock_kb.embedding_model = "BAAI/bge-m3"
+    mock_kb.embedding_base_url = None
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.first.return_value = (mock_agent, mock_kb)
+    mock_session.execute.return_value = mock_result
+
+    subjects = ["产品", "配送", "退货", "支付", "人工服务"]
+    filenames = [
+        "01-products.md",
+        "02-shipping.md",
+        "03-returns.md",
+        "04-payment.md",
+        "05-human-support.md",
+    ]
+    mock_parser = MagicMock()
+    mock_parser.embed_texts = AsyncMock(
+        return_value=[[float(index)] for index in range(len(subjects))]
+    )
+    mock_qdrant = MagicMock()
+    mock_qdrant.search_kb = AsyncMock(
+        side_effect=[
+            [
+                {
+                    "score": 0.8,
+                    "payload": {
+                        "text": f"{subject}资料校验码 TOKEN-{index}",
+                        "doc_id": f"doc-{index}",
+                        "chunk_index": 1,
+                        "filename": filename,
+                    },
+                }
+            ]
+            for index, (subject, filename) in enumerate(
+                zip(subjects, filenames, strict=True)
+            )
+        ]
+    )
+
+    with patch("services.kb_retrieval_service.AsyncSessionLocal") as session_cls:
+        session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        service = KbRetrievalService()
+        service.parser = mock_parser
+        service.qdrant = mock_qdrant
+
+        results = await service.retrieve(
+            tenant_id="tenant_123",
+            agent_id="agent_123",
+            query="请列出产品、配送、退货、支付和人工服务五份资料各自的校验码。",
+            top_k=5,
+        )
+
+    assert mock_parser.embed_texts.call_args.args[0] == [
+        f"{subject}资料校验码" for subject in subjects
+    ]
+    assert mock_qdrant.search_kb.await_count == 5
+    assert [result["filename"] for result in results] == filenames
 
 
 @pytest.mark.asyncio

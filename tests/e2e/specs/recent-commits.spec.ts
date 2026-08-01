@@ -26,7 +26,6 @@ type Agent = {
 
 async function loginByApi(request: APIRequestContext): Promise<string> {
   const loginRes = await request.post(`${API_BASE}/api/admin/login`, {
-    headers: { 'X-Forwarded-For': `203.0.113.${Math.floor(Math.random() * 200) + 1}` },
     data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
   });
   expect(loginRes.status(), await loginRes.text()).toBe(200);
@@ -178,14 +177,6 @@ test.describe('Recent commit regressions', () => {
   });
 
   test('auth language switcher works before login', async ({ page }) => {
-    await page.route('**/api/admin/login', async (route) => {
-      await route.continue({
-        headers: {
-          ...route.request().headers(),
-          'X-Forwarded-For': `203.0.113.${Math.floor(Math.random() * 200) + 1}`,
-        },
-      });
-    });
     await page.goto('/login');
     await expect(page.getByRole('button', { name: /login|登录/i })).toBeVisible();
 

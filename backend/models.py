@@ -58,6 +58,7 @@ class Workspace(Base):
     )
     quotas = relationship("WorkspaceQuota", back_populates="workspace", uselist=False)
     admin_users = relationship("AdminUser", back_populates="workspace")
+    tenants = relationship("Tenant", back_populates="workspace")
 
 
 class Agent(Base):
@@ -317,7 +318,7 @@ class ChatSession(Base):
     visitor_region = Column(String(50), nullable=True)  # 访客省份/地区
     visitor_city = Column(String(50), nullable=True)  # 访客城市
 
-    # 会话状态: active-活跃, taken_over-已接管, closed-已关闭
+    # 会话状态: active-活跃, handoff_requested-等待人工, taken_over-已接管, closed-已关闭
     status = Column(String(20), nullable=False, default="active", index=True)
 
     # 统计
@@ -511,6 +512,9 @@ class Tenant(Base):
     __tablename__ = "tenants"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    workspace_id = Column(
+        Integer, ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     name = Column(String(100), nullable=False)
     slug = Column(String(50), unique=True, nullable=False, index=True)
     plan = Column(String(20), nullable=False, default="free")
@@ -519,6 +523,7 @@ class Tenant(Base):
     knowledge_bases = relationship(
         "KnowledgeBase", back_populates="tenant", cascade="all, delete-orphan"
     )
+    workspace = relationship("Workspace", back_populates="tenants")
 
 
 class KnowledgeBase(Base):

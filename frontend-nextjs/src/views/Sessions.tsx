@@ -7,6 +7,7 @@ import { useAuth } from '../context/AuthContext'
 import AdminLayout from '../components/AdminLayout'
 import HelpTooltip from '../components/HelpTooltip'
 import { MarkdownRenderer } from '../components/MarkdownRenderer'
+import { CitationList } from '../components/CitationList'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { WS_BASE_URL } from '../lib/env'
 import { formatAssistantMessageContent } from '../utils/citations'
@@ -39,6 +40,21 @@ interface Message {
   created_at: string
 }
 
+type SessionStatus = 'active' | 'handoff_requested' | 'taken_over' | 'closed'
+
+const sessionStatusKey = (status: string) => {
+  if (status === 'handoff_requested') return 'handoffRequested'
+  if (status === 'taken_over') return 'takenOver'
+  if (status === 'closed') return 'ended'
+  return status
+}
+
+const sessionBadgeClass = (status: string) => {
+  if (status === 'active') return 'badge-success'
+  if (status === 'handoff_requested' || status === 'taken_over') return 'badge-warning'
+  return 'badge-info'
+}
+
 export default function Sessions() {
   const { t } = useTranslation('common')
   const { agentId } = useParams<{ agentId?: string }>()
@@ -47,7 +63,7 @@ export default function Sessions() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [selectedSession, setSelectedSession] = useState<Session | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
-  const [filter, setFilter] = useState<'all' | 'active' | 'taken_over' | 'closed'>('all')
+  const [filter, setFilter] = useState<'all' | SessionStatus>('all')
   const [keyword, setKeyword] = useState('')
   const [inputValue, setInputValue] = useState('')
   const [loading, setLoading] = useState(false)
@@ -305,6 +321,7 @@ export default function Sessions() {
                 content={[
                   t('settings.chatCenterDesc'),
                   t('settings.activeDesc'),
+                  t('settings.handoffRequestedDesc'),
                   t('settings.takenOverDesc'),
                   t('settings.endedDesc'),
                   t('settings.searchSupport')
@@ -319,7 +336,7 @@ export default function Sessions() {
               gap: 'var(--space-3)',
               marginBottom: 'var(--space-3)',
             }}>
-              {(['all', 'active', 'taken_over', 'closed'] as const).map((status) => (
+              {(['all', 'active', 'handoff_requested', 'taken_over', 'closed'] as const).map((status) => (
                 <button
                   key={status}
                   onClick={() => setFilter(status)}
@@ -334,7 +351,7 @@ export default function Sessions() {
                     fontWeight: 500,
                   }}
                 >
-                  {status === 'all' ? t('status.all') : t(`status.${status === 'taken_over' ? 'takenOver' : status === 'closed' ? 'ended' : status}`)}
+                  {status === 'all' ? t('status.all') : t(`status.${sessionStatusKey(status)}`)}
                 </button>
               ))}
             </div>
@@ -429,8 +446,8 @@ export default function Sessions() {
                       }}>
                         {t('settings.sessionWithId', { id: session.session_id })}
                       </span>
-                      <span className={`badge ${session.status === 'active' ? 'badge-success' : session.status === 'taken_over' ? 'badge-warning' : 'badge-info'}`}>
-                        {t(`status.${session.status === 'taken_over' ? 'takenOver' : session.status === 'closed' ? 'ended' : session.status}`)}
+                      <span className={`badge ${sessionBadgeClass(session.status)}`}>
+                        {t(`status.${sessionStatusKey(session.status)}`)}
                       </span>
                     </div>
                     <div style={{
@@ -528,14 +545,14 @@ export default function Sessions() {
                           📍 {selectedSession.visitor_city || selectedSession.visitor_country}
                         </span>
                       )}
-                      <span className={`badge ${selectedSession.status === 'active' ? 'badge-success' : selectedSession.status === 'taken_over' ? 'badge-warning' : 'badge-info'}`}>
-                        {t(`status.${selectedSession.status === 'taken_over' ? 'takenOver' : selectedSession.status === 'closed' ? 'ended' : selectedSession.status}`)}
+                      <span className={`badge ${sessionBadgeClass(selectedSession.status)}`}>
+                        {t(`status.${sessionStatusKey(selectedSession.status)}`)}
                       </span>
                     </div>
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 'var(--space-3)', flexShrink: 0 }}>
-                  {selectedSession.status === 'active' && (
+                  {(selectedSession.status === 'active' || selectedSession.status === 'handoff_requested') && (
                     <button
                       onClick={() => handleTakeover(selectedSession.id)}
                       style={{
@@ -635,26 +652,10 @@ export default function Sessions() {
                             {msg.role === 'user' ? msg.content : (
                               <>
                                 <MarkdownRenderer content={formattedAssistantContent?.content ?? msg.content} />
-                                {formattedAssistantContent && formattedAssistantContent.references.length > 0 && (
-                                  <div style={{ marginTop: 'var(--space-3)', paddingTop: 'var(--space-3)', borderTop: '1px solid rgba(255,255,255,0.25)' }}>
-                                    <div style={{ fontSize: 'var(--text-xs)', opacity: 0.85, marginBottom: 'var(--space-2)', fontWeight: 600 }}>
-                                      {t('citations.references')}
-                                    </div>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-                                      {formattedAssistantContent.references.map((reference) => (
-                                        <a
-                                          key={reference.url}
-                                          href={reference.url}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          style={{ color: 'inherit', textDecoration: 'underline', fontSize: 'var(--text-sm)', fontWeight: 600, wordBreak: 'break-word' }}
-                                        >
-                                          {reference.title}
-                                        </a>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
+                                <CitationList
+                                  references={formattedAssistantContent?.references ?? []}
+                                  inverse
+                                />
                               </>
                             )}
                           </div>

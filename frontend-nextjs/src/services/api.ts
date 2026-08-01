@@ -40,7 +40,9 @@ export interface Source {
 	type: "url" | "file";
 	title?: string;
 	url?: string;
+	filename?: string;
 	snippet?: string;
+	doc_id?: string;
 	question?: string;
 	id?: string;
 }

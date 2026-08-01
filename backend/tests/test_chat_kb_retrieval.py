@@ -161,8 +161,8 @@ async def test_chat_system_message_includes_kb_context():
 
 
 @pytest.mark.asyncio
-async def test_chat_kb_retrieval_without_kb_id_returns_no_context():
-    """Agent without kb_id should not trigger KB retrieval and system message should indicate no KB."""
+async def test_chat_without_kb_id_keeps_general_llm_mode():
+    """Agent without a bound KB should not be treated as a failed KB lookup."""
     from api.v1.endpoints import prepare_chat_request
     from api.v1.schemas import ChatRequest
 
@@ -225,12 +225,169 @@ async def test_chat_kb_retrieval_without_kb_id_returns_no_context():
                     # (based on current implementation: if getattr(agent, "kb_id", None): ...)
                     mock_kb_svc.retrieve.assert_not_called()
 
-                    # System message should indicate no KB
+                    assert result["mode"] == "llm"
+
+                    # A general-purpose agent should not receive a false KB miss notice.
                     messages = result.get("messages", [])
                     system_msg = next((m for m in messages if m.get("role") == "system"), None)
                     assert system_msg is not None
                     system_content = system_msg.get("content", "")
-                    assert "No relevant information" in system_content or "no relevant information" in system_content.lower()
+                    assert "No relevant information" not in system_content
+                    assert "training data" not in system_content.lower()
+
+
+def test_persona_presets_use_knowledge_base_terminology():
+    from api.v1.endpoints import PERSONA_PRESETS, normalize_knowledge_terminology
+
+    for prompt in PERSONA_PRESETS.values():
+        assert "training data" not in prompt.lower()
+        assert "knowledge base" in prompt.lower()
+
+    normalized = normalize_knowledge_terminology(
+        "Rely on training data. 不要向用户提到训练数据。"
+    )
+    assert "training data" not in normalized.lower()
+    assert "训练数据" not in normalized
+    assert "current retrieved knowledge base materials" in normalized
+    assert "当前检索到的知识库资料" in normalized
+
+
+def test_knowledge_fallback_reply_matches_supported_language():
+    from api.v1.endpoints import get_knowledge_fallback_reply
+
+    zh_reply = get_knowledge_fallback_reply("你们支持火星配送吗？", locale="zh-CN")
+    en_reply = get_knowledge_fallback_reply(
+        "Do you ship to Mars?", locale="en-US"
+    )
+
+    assert "当前检索到的知识库资料" in zh_reply
+    assert "训练数据" not in zh_reply
+    assert "currently retrieved knowledge base materials" in en_reply
+    assert "training data" not in en_reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_bound_kb_without_hits_returns_server_fallback_without_llm():
+    """No/low-score KB hits should skip the model and return a stable reply."""
+    from api.v1.endpoints import prepare_chat_request
+    from api.v1.schemas import ChatRequest
+
+    mock_agent = MagicMock()
+    mock_agent.id = "agent_no_hits"
+    mock_agent.workspace_id = "ws_123"
+    mock_agent.kb_id = "kb_123"
+    mock_agent.top_k = 5
+    mock_agent.similarity_threshold = 0.05
+    mock_agent.temperature = 0.7
+    mock_agent.system_prompt = "Rely on training data."
+    mock_agent.enable_context = False
+    mock_agent.api_key = "test_key"
+    mock_agent.api_base = "https://api.test.com"
+    mock_agent.model = "test-model"
+    mock_agent.provider_type = "openai"
+    mock_agent.rate_limit_per_minute = 0
+    mock_agent.restricted_reply = "服务暂时不可用"
+
+    mock_db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_agent
+    mock_db.execute.return_value = mock_result
+
+    mock_quota = MagicMock()
+    mock_quota.used_messages_today = 0
+    mock_quota.max_messages_per_day = 100
+    mock_quota.id = "quota_123"
+
+    chat_request = ChatRequest(
+        agent_id="agent_no_hits",
+        message="你们支持火星配送吗？",
+        locale="zh-CN",
+        params={},
+    )
+    mock_http_request = MagicMock()
+    mock_http_request.headers.get.return_value = ""
+
+    with patch("api.v1.endpoints.check_quota", return_value=mock_quota):
+        with patch("api.v1.endpoints.get_or_create_chat_session") as session_fn:
+            mock_chat_session = MagicMock()
+            mock_chat_session.id = "session_123"
+            mock_chat_session.status = "active"
+            session_fn.return_value = mock_chat_session
+
+            with patch("api.v1.endpoints.KbRetrievalService") as retriever_cls:
+                retriever = MagicMock()
+                retriever.retrieve = AsyncMock(return_value=[])
+                retriever_cls.return_value = retriever
+
+                with patch("api.v1.endpoints.get_llm_service") as get_llm:
+                    result = await prepare_chat_request(
+                        chat_request, mock_http_request, mock_db
+                    )
+
+    assert result["mode"] == "knowledge_fallback"
+    assert result["sources"] == []
+    assert "当前检索到的知识库资料" in result["reply"]
+    assert "训练数据" not in result["reply"]
+    get_llm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_kb_retrieval_failure_returns_service_fallback_without_llm():
+    """A retrieval outage should not be presented as missing knowledge."""
+    from api.v1.endpoints import prepare_chat_request
+    from api.v1.schemas import ChatRequest
+
+    mock_agent = MagicMock()
+    mock_agent.id = "agent_retrieval_failure"
+    mock_agent.workspace_id = "ws_123"
+    mock_agent.kb_id = "kb_123"
+    mock_agent.top_k = 5
+    mock_agent.similarity_threshold = 0.05
+    mock_agent.temperature = 0.7
+    mock_agent.system_prompt = "You are helpful."
+    mock_agent.enable_context = False
+    mock_agent.api_key = "test_key"
+    mock_agent.api_base = "https://api.test.com"
+    mock_agent.model = "test-model"
+    mock_agent.provider_type = "openai"
+    mock_agent.rate_limit_per_minute = 0
+    mock_agent.restricted_reply = "服务暂时不可用"
+
+    mock_db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_agent
+    mock_db.execute.return_value = mock_result
+    mock_quota = MagicMock(
+        used_messages_today=0,
+        max_messages_per_day=100,
+        id="quota_123",
+    )
+    request = ChatRequest(
+        agent_id=mock_agent.id,
+        message="配送需要多久？",
+        locale="zh-CN",
+        params={},
+    )
+    http_request = MagicMock()
+    http_request.headers.get.return_value = ""
+
+    with patch("api.v1.endpoints.check_quota", return_value=mock_quota):
+        with patch("api.v1.endpoints.get_or_create_chat_session") as session_fn:
+            chat_session = MagicMock(id="session_123", status="active")
+            session_fn.return_value = chat_session
+            with patch("api.v1.endpoints.KbRetrievalService") as retriever_cls:
+                retriever = MagicMock()
+                retriever.retrieve = AsyncMock(side_effect=RuntimeError("qdrant down"))
+                retriever_cls.return_value = retriever
+                with patch("api.v1.endpoints.get_llm_service") as get_llm:
+                    result = await prepare_chat_request(
+                        request, http_request, mock_db
+                    )
+
+    assert result["mode"] == "service_fallback"
+    assert result["reply"] == "服务暂时不可用"
+    assert result["sources"] == []
+    get_llm.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -373,3 +530,14 @@ async def test_ready_kb_content_with_unique_phrase_passed_to_chat_context():
                     assert "ready_document.txt" in system_content, (
                         "Source filename should be in KB context"
                     )
+
+                    assert result["sources"] == [
+                        {
+                            "type": "file",
+                            "title": "ready_document.txt",
+                            "url": "",
+                            "filename": "ready_document.txt",
+                            "doc_id": "doc_ready_001",
+                            "snippet": f"This is the document content containing {unique_phrase} which proves KB retrieval works.",
+                        }
+                    ]

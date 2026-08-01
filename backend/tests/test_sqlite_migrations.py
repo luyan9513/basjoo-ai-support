@@ -484,3 +484,41 @@ def test_migration_cleans_cross_workspace_agent_members():
         assert ("agt_1", 2) in member_pairs  # admin → agt_1
     finally:
         os.unlink(db_path)
+
+
+def test_migration_adds_and_backfills_tenant_workspace_id():
+    """Existing tenants inherit workspace ownership from their bound agent."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT, owner_email TEXT)")
+        conn.execute("INSERT INTO workspaces (id, name, owner_email) VALUES (7, 'WS7', 'ws7@test.com')")
+        conn.execute("CREATE TABLE tenants (id TEXT PRIMARY KEY, name TEXT, slug TEXT)")
+        conn.execute("INSERT INTO tenants (id, name, slug) VALUES ('tenant-7', 'Tenant 7', 'tenant-7')")
+        conn.execute("CREATE TABLE knowledge_bases (id TEXT PRIMARY KEY, tenant_id TEXT)")
+        conn.execute("INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb-7', 'tenant-7')")
+        conn.executescript(OLD_AGENTS_DDL)
+        conn.execute(
+            "INSERT INTO agents (id, workspace_id, name, model, api_base) "
+            "VALUES ('agent-7', 7, 'Agent 7', 'gpt-4o-mini', 'https://api.openai.com/v1')"
+        )
+        conn.execute("ALTER TABLE agents ADD COLUMN kb_id TEXT")
+        conn.execute("UPDATE agents SET kb_id = 'kb-7' WHERE id = 'agent-7'")
+        conn.commit()
+        conn.close()
+
+        run_sqlite_migrations(f"sqlite:///{db_path}")
+        run_sqlite_migrations(f"sqlite:///{db_path}")
+
+        conn = sqlite3.connect(db_path)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tenants)")}
+        workspace_id = conn.execute(
+            "SELECT workspace_id FROM tenants WHERE id = 'tenant-7'"
+        ).fetchone()[0]
+        conn.close()
+
+        assert "workspace_id" in columns
+        assert workspace_id == 7
+    finally:
+        os.unlink(db_path)

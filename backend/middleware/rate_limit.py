@@ -7,6 +7,8 @@ API级速率限制中间件
 """
 
 from collections import defaultdict, deque
+import hashlib
+import ipaddress
 import logging
 import time
 from typing import Deque, Dict, Optional, Tuple
@@ -70,23 +72,75 @@ def apply_cors_headers(request: Request, response: Response) -> Response:
     return response
 
 
-def get_request_client_ip(request: Request) -> str:
-    """Get the originating client IP, preferring the first forwarded IP."""
+def _parse_trusted_proxy_networks(value: str):
+    networks = []
+    for candidate in value.split(","):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(candidate, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid trusted proxy CIDR")
+    return networks
+
+
+def _parse_ip(value: str):
+    try:
+        return ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+
+
+def _is_trusted_proxy(address, networks) -> bool:
+    return address is not None and any(address in network for network in networks)
+
+
+def hash_log_identifier(value: str) -> str:
+    """Return a short irreversible identifier suitable for operational logs."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def hash_client_ip(client_ip: str) -> str:
+    return hash_log_identifier(client_ip)
+
+
+def get_request_client_ip(
+    request: Request,
+    trusted_proxy_cidrs: str | None = None,
+) -> str:
+    """Resolve client IP without trusting forwarding headers from arbitrary peers."""
+    peer_host = request.client.host if request.client and request.client.host else "unknown"
+    peer_ip = _parse_ip(peer_host)
+    if peer_ip is None:
+        return peer_host
+
+    networks = _parse_trusted_proxy_networks(
+        settings.trusted_proxy_cidrs
+        if trusted_proxy_cidrs is None
+        else trusted_proxy_cidrs
+    )
+    if not _is_trusted_proxy(peer_ip, networks):
+        return str(peer_ip)
+
     forwarded = request.headers.get("X-Forwarded-For", "")
     if forwarded:
+        chain = []
         for candidate in forwarded.split(","):
-            candidate = candidate.strip()
-            if candidate:
-                return candidate
+            address = _parse_ip(candidate)
+            if address is None:
+                return str(peer_ip)
+            chain.append(address)
 
-    real_ip = request.headers.get("X-Real-IP", "")
-    if real_ip:
-        return real_ip.strip()
+        for address in reversed(chain):
+            if not _is_trusted_proxy(address, networks):
+                return str(address)
 
-    if request.client and request.client.host:
-        return request.client.host
+    real_ip = _parse_ip(request.headers.get("X-Real-IP", ""))
+    if real_ip is not None:
+        return str(real_ip)
 
-    return "unknown"
+    return str(peer_ip)
 
 
 def should_apply_rate_limit(request: Request) -> bool:
@@ -144,6 +198,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         requests_per_minute: int = 60,
         burst_size: int = 10,
         use_redis: bool = True,
+        trusted_proxy_cidrs: str | None = None,
     ):
         """
         初始化速率限制中间件
@@ -158,6 +213,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.requests_per_minute = requests_per_minute
         self.burst_size = burst_size
         self.use_redis = use_redis
+        self.trusted_proxy_cidrs = (
+            settings.trusted_proxy_cidrs
+            if trusted_proxy_cidrs is None
+            else trusted_proxy_cidrs
+        )
 
         # 内存限流的备用存储
         self.request_history: Dict[str, Deque[float]] = defaultdict(deque)
@@ -181,8 +241,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             if self._redis_service is None or self._redis_loop_id != loop_id:
                 self._redis_service = await get_redis()
                 self._redis_loop_id = loop_id
-        except Exception as e:
-            logger.warning(f"Redis not available, falling back to memory: {e}")
+        except Exception:
+            logger.warning(
+                "rate_limit_backend_fallback backend=memory reason=redis_unavailable"
+            )
             self.use_redis = False
             self._redis_service = None
             self._redis_loop_id = None
@@ -197,10 +259,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         client_ip = self._get_client_ip(request)
 
         # 检查速率限制
-        allowed, remaining = await self._check_rate_limit(client_ip)
+        allowed, remaining, backend = await self._check_rate_limit_with_backend(client_ip)
 
         if not allowed:
-            logger.warning(f"Rate limit exceeded for IP: {client_ip}")
+            logger.warning(
+                "rate_limit_exceeded client_hash=%s backend=%s path=%s",
+                hash_client_ip(client_ip),
+                backend,
+                request.url.path,
+            )
             response = JSONResponse(
                 status_code=429,
                 content={
@@ -223,7 +290,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     def _get_client_ip(self, request: Request) -> str:
         """获取客户端IP地址"""
-        return get_request_client_ip(request)
+        return get_request_client_ip(request, self.trusted_proxy_cidrs)
 
     async def _check_rate_limit(self, ip: str) -> Tuple[bool, int]:
         """
@@ -235,7 +302,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         Returns:
             (是否允许, 剩余请求数)
         """
-        # 尝试使用 Redis
+        allowed, remaining, _backend = await self._check_rate_limit_with_backend(ip)
+        return allowed, remaining
+
+    async def _check_rate_limit_with_backend(self, ip: str) -> Tuple[bool, int, str]:
+        """Check the limit and report which backend made the decision."""
         redis = await self._get_redis()
         if redis:
             try:
@@ -245,12 +316,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     max_requests=self.requests_per_minute,
                     window_seconds=60,
                 )
-                return allowed, remaining
-            except Exception as e:
-                logger.warning(f"Redis rate limit error, falling back to memory: {e}")
+                return allowed, remaining, "redis"
+            except Exception:
+                logger.warning(
+                    "rate_limit_backend_fallback backend=memory reason=redis_error"
+                )
+                self.use_redis = False
+                self._redis_service = None
+                self._redis_loop_id = None
 
         # 使用内存限流
-        return self._check_memory_rate_limit(ip)
+        allowed, remaining = self._check_memory_rate_limit(ip)
+        return allowed, remaining, "memory"
 
     def _check_memory_rate_limit(self, ip: str) -> Tuple[bool, int]:
         """
@@ -270,7 +347,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             self.last_burst_reset = current_time
 
         if self.burst_counters[ip] >= self.burst_size:
-            logger.debug(f"Burst rate limit exceeded for IP: {ip}")
+            logger.debug(
+                "burst_rate_limit_exceeded client_hash=%s", hash_client_ip(ip)
+            )
             return False, 0
 
         allowed, remaining = check_memory_sliding_window(
@@ -280,7 +359,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             window_seconds=60,
         )
         if not allowed:
-            logger.debug(f"Minute rate limit exceeded for IP: {ip}")
+            logger.debug(
+                "minute_rate_limit_exceeded client_hash=%s", hash_client_ip(ip)
+            )
             return False, 0
 
         self.burst_counters[ip] += 1

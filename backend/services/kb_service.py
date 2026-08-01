@@ -173,7 +173,17 @@ class KbService:
         if not tenant_id:
             raise ValueError("tenant_id is required")
         async with await self._get_session() as session:
-            # Check agent references
+            kb_result = await session.execute(
+                select(KnowledgeBase).where(
+                    KnowledgeBase.id == kb_id,
+                    KnowledgeBase.tenant_id == tenant_id,
+                )
+            )
+            kb = kb_result.scalar_one_or_none()
+            if not kb:
+                return
+
+            # Check agent references only after tenant ownership is confirmed.
             from models import Agent
 
             agent_ref = await session.scalar(
@@ -183,9 +193,6 @@ class KbService:
                 from fastapi import HTTPException
 
                 raise HTTPException(400, "KB referenced by agent(s). Unbind first.")
-            kb = await session.get(KnowledgeBase, kb_id)
-            if not kb:
-                return
             # Delete Qdrant
             await self.qdrant.delete_collection(kb_id)
             # Delete chunks + docs
@@ -369,6 +376,12 @@ class KbService:
             row = result.first()
             if row:
                 kb, tenant = row[0], row[1]
+                tenant_workspace_id = getattr(tenant, "workspace_id", None)
+                if tenant_workspace_id is None:
+                    # Safe legacy repair: the bound agent establishes ownership.
+                    tenant.workspace_id = agent.workspace_id
+                elif tenant_workspace_id != agent.workspace_id:
+                    raise ValueError("Agent KB tenant belongs to another workspace")
                 # Reconcile: ensure kb_setup_completed is True and Qdrant collection exists
                 agent.kb_setup_completed = True
                 # Re-ensure Qdrant collection using current embedding model
@@ -389,6 +402,7 @@ class KbService:
 
         tenant = Tenant(
             id=str(uuid4()),
+            workspace_id=agent.workspace_id,
             name=f"Tenant for Agent {agent.name}",
             slug=f"agent-{agent_id[:8]}",
         )

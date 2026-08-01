@@ -117,6 +117,7 @@ services:
       - ENCRYPTION_KEY_FILE=${ENCRYPTION_KEY_FILE:-/app/data/.encryption_key}
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-1000}
       - RATE_LIMIT_BURST_SIZE=${RATE_LIMIT_BURST_SIZE:-200}
+      - "TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-}"
       - LOG_LEVEL=INFO
       - SCRAPLING_SERVICE_URL=http://scrapling-service:8001
     volumes:
@@ -211,6 +212,7 @@ services:
       - ENCRYPTION_KEY_FILE=${ENCRYPTION_KEY_FILE:-/app/data/.encryption_key}
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-1000}
       - RATE_LIMIT_BURST_SIZE=${RATE_LIMIT_BURST_SIZE:-200}
+      - "TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-}"
       - LOG_LEVEL=DEBUG
       - SCRAPLING_SERVICE_URL=http://scrapling-service:8001
     volumes:

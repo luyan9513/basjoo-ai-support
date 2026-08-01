@@ -1,4 +1,6 @@
+import hashlib
 import json
+import logging
 
 import pytest
 
@@ -132,6 +134,106 @@ async def test_chat_stream_hides_internal_errors(
 
 
 @pytest.mark.asyncio
+async def test_chat_persists_server_knowledge_fallback():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from api.v1.endpoints import chat
+    from api.v1.schemas import ChatRequest
+
+    request = ChatRequest(agent_id="agent_123", message="火星配送需要多久？")
+    http_request = MagicMock()
+    session = MagicMock(id="db_session", session_id="public_session")
+    context = {
+        "mode": "knowledge_fallback",
+        "reply": "当前检索到的知识库资料不足。",
+        "sources": [],
+        "session": session,
+        "workspace_id": 1,
+        "quota_id": 2,
+    }
+    prep_db = AsyncMock()
+    assistant_message = MagicMock(id=99)
+
+    with patch("api.v1.endpoints.database.AsyncSessionLocal") as session_factory:
+        session_factory.return_value.__aenter__ = AsyncMock(return_value=prep_db)
+        session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch(
+            "api.v1.endpoints.prepare_chat_request",
+            AsyncMock(return_value=context),
+        ):
+            with patch(
+                "api.v1.endpoints.persist_chat_response",
+                AsyncMock(return_value=assistant_message),
+            ) as persist:
+                with patch(
+                    "api.v1.endpoints.publish_chat_response",
+                    AsyncMock(),
+                ):
+                    response = await chat(request, http_request)
+
+    assert response.reply == context["reply"]
+    assert response.sources == []
+    assert response.usage is None
+    assert response.session_id == "public_session"
+    assert response.message_id == 99
+    persist.assert_awaited_once()
+    assert persist.await_args.kwargs["usage"] is None
+    assert persist.await_args.kwargs["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_persists_server_knowledge_fallback():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from api.v1.endpoints import chat_stream
+    from api.v1.schemas import ChatRequest
+
+    request = ChatRequest(agent_id="agent_123", message="火星配送需要多久？")
+    http_request = MagicMock()
+    session = MagicMock(id="db_session", session_id="public_session")
+    context = {
+        "mode": "knowledge_fallback",
+        "reply": "当前检索到的知识库资料不足。",
+        "sources": [],
+        "session": session,
+        "workspace_id": 1,
+        "quota_id": 2,
+    }
+    prep_db = AsyncMock()
+    assistant_message = MagicMock(id=100)
+
+    with patch("api.v1.endpoints.database.AsyncSessionLocal") as session_factory:
+        session_factory.return_value.__aenter__ = AsyncMock(return_value=prep_db)
+        session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch(
+            "api.v1.endpoints.prepare_chat_request",
+            AsyncMock(return_value=context),
+        ):
+            with patch(
+                "api.v1.endpoints.persist_chat_response",
+                AsyncMock(return_value=assistant_message),
+            ) as persist:
+                with patch(
+                    "api.v1.endpoints.publish_chat_response",
+                    AsyncMock(),
+                ):
+                    response = await chat_stream(request, http_request)
+                    body_parts = []
+                    async for part in response.body_iterator:
+                        body_parts.append(
+                            part.decode() if isinstance(part, bytes) else part
+                        )
+
+    body = "".join(body_parts)
+    assert "event: sources" in body
+    assert "event: content" in body
+    assert context["reply"] in body
+    assert "event: done" in body
+    assert '"message_id": 100' in body
+    persist.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_takeover_admin_reply_visible_via_public_polling(
     client, default_agent_id
 ):
@@ -176,6 +278,159 @@ async def test_takeover_admin_reply_visible_via_public_polling(
 
 
 @pytest.mark.asyncio
+async def test_visitor_handoff_request_is_idempotent_and_visible_to_admin(
+    client, public_client, default_agent_id
+):
+    visitor_id = "visitor_handoff_001"
+    chat_response = await public_client.post(
+        "/api/v1/chat",
+        json={
+            "agent_id": default_agent_id,
+            "message": "I need help with my order",
+            "visitor_id": visitor_id,
+        },
+    )
+    assert chat_response.status_code == 200
+    business_session_id = chat_response.json()["session_id"]
+
+    payload = {
+        "agent_id": default_agent_id,
+        "session_id": business_session_id,
+        "visitor_id": visitor_id,
+        "locale": "en-US",
+    }
+    first_request = await public_client.post("/api/v1/chat/handoff", json=payload)
+    repeated_request = await public_client.post("/api/v1/chat/handoff", json=payload)
+
+    assert first_request.status_code == 200
+    assert first_request.json()["status"] == "handoff_requested"
+    assert first_request.json()["created"] is True
+    assert first_request.json()["message_id"] is not None
+    assert repeated_request.status_code == 200
+    assert repeated_request.json()["status"] == "handoff_requested"
+    assert repeated_request.json()["created"] is False
+
+    sessions_response = await client.get(
+        "/api/v1/admin/sessions?skip=0&limit=20&status=handoff_requested"
+    )
+    assert sessions_response.status_code == 200
+    matched_session = next(
+        item
+        for item in sessions_response.json()["items"]
+        if item["session_id"] == business_session_id
+    )
+
+    messages_response = await client.get(
+        f"/api/v1/admin/sessions/{matched_session['id']}/messages"
+    )
+    assert messages_response.status_code == 200
+    notices = [
+        message
+        for message in messages_response.json()
+        if "human agent" in message["content"].lower()
+    ]
+    assert len(notices) == 1
+
+
+@pytest.mark.asyncio
+async def test_handoff_waiting_messages_skip_ai_then_admin_can_take_over(
+    client, public_client, default_agent_id
+):
+    visitor_id = "visitor_handoff_002"
+    chat_response = await public_client.post(
+        "/api/v1/chat",
+        json={
+            "agent_id": default_agent_id,
+            "message": "Please connect me to support",
+            "visitor_id": visitor_id,
+        },
+    )
+    business_session_id = chat_response.json()["session_id"]
+
+    handoff_response = await public_client.post(
+        "/api/v1/chat/handoff",
+        json={
+            "agent_id": default_agent_id,
+            "session_id": business_session_id,
+            "visitor_id": visitor_id,
+            "locale": "en-US",
+        },
+    )
+    assert handoff_response.status_code == 200
+
+    waiting_message = await public_client.post(
+        "/api/v1/chat",
+        json={
+            "agent_id": default_agent_id,
+            "message": "My order number is DEMO-1001",
+            "session_id": business_session_id,
+            "visitor_id": visitor_id,
+        },
+    )
+    assert waiting_message.status_code == 200
+    assert waiting_message.json()["reply"] == ""
+    assert waiting_message.json()["handoff_requested"] is True
+    assert waiting_message.json()["taken_over"] is False
+
+    sessions_response = await client.get(
+        "/api/v1/admin/sessions?skip=0&limit=20&status=handoff_requested"
+    )
+    matched_session = next(
+        item
+        for item in sessions_response.json()["items"]
+        if item["session_id"] == business_session_id
+    )
+
+    takeover_response = await client.post(
+        f"/api/v1/admin/sessions/{matched_session['id']}/takeover"
+    )
+    assert takeover_response.status_code == 200
+
+    send_response = await client.post(
+        "/api/v1/admin/sessions/send",
+        json={
+            "session_id": matched_session["id"],
+            "content": "A human agent is now helping you.",
+        },
+    )
+    assert send_response.status_code == 200
+
+    messages_response = await client.get(
+        f"/api/v1/admin/sessions/{matched_session['id']}/messages"
+    )
+    messages = messages_response.json()
+    assert any(message["content"] == "My order number is DEMO-1001" for message in messages)
+    assert any(message["content"] == "A human agent is now helping you." for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_handoff_request_rejects_mismatched_visitor(
+    public_client, default_agent_id
+):
+    chat_response = await public_client.post(
+        "/api/v1/chat",
+        json={
+            "agent_id": default_agent_id,
+            "message": "Start session",
+            "visitor_id": "visitor_owner",
+        },
+    )
+    business_session_id = chat_response.json()["session_id"]
+
+    response = await public_client.post(
+        "/api/v1/chat/handoff",
+        json={
+            "agent_id": default_agent_id,
+            "session_id": business_session_id,
+            "visitor_id": "visitor_other",
+            "locale": "en-US",
+        },
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_update_agent_accepts_legacy_rate_limit_field(client):
     agent_response = await client.get("/api/v1/agent:default")
     agent_id = agent_response.json()["id"]
@@ -187,6 +442,40 @@ async def test_update_agent_accepts_legacy_rate_limit_field(client):
 
     assert update_response.status_code == 200
     assert update_response.json()["rate_limit_per_minute"] == 3
+
+
+@pytest.mark.asyncio
+async def test_session_rate_limit_log_records_scope_without_raw_session_id(
+    client, public_client, default_agent_id, caplog
+):
+    agent_response = await client.get("/api/v1/agent:default")
+    agent_id = agent_response.json()["id"]
+    await client.put(
+        f"/api/v1/agent?agent_id={agent_id}",
+        json={"rate_limit_per_minute": 1, "restricted_reply": "Limited"},
+    )
+    first_response = await public_client.post(
+        "/api/v1/chat",
+        json={"agent_id": default_agent_id, "message": "First message"},
+    )
+    session_id = first_response.json()["session_id"]
+    expected_hash = hashlib.sha256(session_id.encode()).hexdigest()[:12]
+
+    with caplog.at_level(logging.WARNING, logger="api.v1.endpoints"):
+        limited_response = await public_client.post(
+            "/api/v1/chat",
+            json={
+                "agent_id": default_agent_id,
+                "message": "Second message",
+                "session_id": session_id,
+            },
+        )
+
+    assert limited_response.status_code == 200
+    assert limited_response.json()["reply"] == "Limited"
+    assert session_id not in caplog.text
+    assert "chat_rate_limit_exceeded scope=session" in caplog.text
+    assert f"session_hash={expected_hash}" in caplog.text
 
 
 @pytest.mark.asyncio

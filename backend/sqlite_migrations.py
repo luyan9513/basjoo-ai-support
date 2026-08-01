@@ -127,6 +127,44 @@ def run_sqlite_migrations(database_url: str) -> None:
                 ],
             )
 
+        # ── tenants workspace ownership ───────────────────────────────────
+        if _table_exists(cursor, "tenants") and _table_exists(cursor, "workspaces"):
+            _ensure_columns(
+                cursor,
+                "tenants",
+                [("workspace_id", "INTEGER REFERENCES workspaces(id)")],
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS ix_tenants_workspace_id ON tenants(workspace_id)"
+            )
+            if _table_exists(cursor, "knowledge_bases") and _table_exists(
+                cursor, "agents"
+            ):
+                cursor.execute(
+                    """
+                    UPDATE tenants
+                    SET workspace_id = (
+                        SELECT MIN(a.workspace_id)
+                        FROM knowledge_bases kb
+                        JOIN agents a ON a.kb_id = kb.id
+                        WHERE kb.tenant_id = tenants.id
+                          AND a.workspace_id IS NOT NULL
+                    )
+                    WHERE workspace_id IS NULL
+                      AND 1 = (
+                        SELECT COUNT(DISTINCT a.workspace_id)
+                        FROM knowledge_bases kb
+                        JOIN agents a ON a.kb_id = kb.id
+                        WHERE kb.tenant_id = tenants.id
+                          AND a.workspace_id IS NOT NULL
+                      )
+                    """
+                )
+                if cursor.rowcount > 0:
+                    print(
+                        f"✓ Backfilled workspace_id for {cursor.rowcount} tenant(s)"
+                    )
+
 
         # ── uq_chat_sessions_active_session unique index ───────────────────
         if _table_exists(cursor, "chat_sessions"):

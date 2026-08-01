@@ -1,8 +1,12 @@
 import type { Source } from '../services/api';
 
 export interface CitationReference {
+  type: 'url' | 'file';
   title: string;
-  url: string;
+  url?: string;
+  filename?: string;
+  snippet?: string;
+  docId?: string;
 }
 
 export interface CitationDisplayContent {
@@ -21,6 +25,42 @@ function isUrlSource(source: Source | undefined): source is Source & { type: 'ur
   );
 }
 
+function toReference(source: Source): CitationReference | null {
+  if (isUrlSource(source)) {
+    return {
+      type: 'url',
+      title: source.title?.trim() || source.url,
+      url: source.url,
+      ...(source.snippet?.trim() ? { snippet: source.snippet.trim() } : {}),
+    };
+  }
+
+  if (source.type !== 'file') {
+    return null;
+  }
+
+  const filename = source.filename?.trim();
+  const title = filename || source.title?.trim();
+  if (!title) {
+    return null;
+  }
+
+  return {
+    type: 'file',
+    title,
+    ...(filename ? { filename } : {}),
+    ...(source.snippet?.trim() ? { snippet: source.snippet.trim() } : {}),
+    ...(source.doc_id?.trim() ? { docId: source.doc_id.trim() } : {}),
+  };
+}
+
+function getReferenceKey(reference: CitationReference): string {
+  if (reference.type === 'url') {
+    return `url:${reference.url}`;
+  }
+  return `file:${reference.docId || reference.filename || reference.title}`;
+}
+
 export function formatAssistantMessageContent(
   content: string,
   sources: Source[] = [],
@@ -30,42 +70,34 @@ export function formatAssistantMessageContent(
   }
 
   const references: CitationReference[] = [];
-  const seenUrls = new Set<string>();
+  const seenReferences = new Set<string>();
   const sourceByUrl = new Map<string, Source & { type: 'url'; url: string }>();
 
   for (const source of sources) {
-    if (!isUrlSource(source) || sourceByUrl.has(source.url)) {
+    if (isUrlSource(source) && !sourceByUrl.has(source.url)) {
+      sourceByUrl.set(source.url, source);
+    }
+
+    const reference = toReference(source);
+    if (!reference) {
       continue;
     }
-    sourceByUrl.set(source.url, source);
-  }
-
-  const addReference = (url: string) => {
-    if (seenUrls.has(url)) {
-      return;
+    const key = getReferenceKey(reference);
+    if (seenReferences.has(key)) {
+      continue;
     }
-    seenUrls.add(url);
-    const source = sourceByUrl.get(url);
-    references.push({
-      title: source?.title?.trim() || url,
-      url,
-    });
-  };
+    seenReferences.add(key);
+    references.push(reference);
+  }
 
   const formattedContent = content.replace(
     INLINE_CITATION_PATTERN,
     (_match, label: string, target: string, sourceIndexText?: string) => {
       if (sourceIndexText) {
-        const sourceIndex = Number(sourceIndexText) - 1;
-        const source = sources[sourceIndex];
-        if (isUrlSource(source)) {
-          addReference(source.url);
-        }
         return label;
       }
 
       if (sourceByUrl.has(target)) {
-        addReference(target);
         return label;
       }
 

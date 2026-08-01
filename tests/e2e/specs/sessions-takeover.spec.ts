@@ -37,10 +37,28 @@ test.describe('Admin Sessions Takeover', () => {
     const sessionId = chatData.session_id;
     expect(sessionId).toBeTruthy();
 
-    // 4. Admin views sessions list. The endpoint sorts oldest first, so use a
+    // 4. Visitor explicitly requests a human. Repeating the request must be safe.
+    const handoffPayload = {
+      agent_id: agent.id,
+      session_id: sessionId,
+      visitor_id: 'e2e-visitor',
+      locale: 'en-US',
+    };
+    const handoffRes = await request.post(`${API_BASE}/api/v1/chat/handoff`, {
+      data: handoffPayload,
+    });
+    expect(handoffRes.status()).toBe(200);
+    expect((await handoffRes.json()).status).toBe('handoff_requested');
+    const repeatedHandoffRes = await request.post(`${API_BASE}/api/v1/chat/handoff`, {
+      data: handoffPayload,
+    });
+    expect(repeatedHandoffRes.status()).toBe(200);
+    expect((await repeatedHandoffRes.json()).created).toBe(false);
+
+    // 5. Admin views the waiting-for-human queue.
     // wider limit to find this freshly-created session in reused E2E databases.
     const sessionsRes = await request.get(
-      `${API_BASE}/api/v1/admin/sessions?skip=0&limit=100&agent_id=${agent.id}`,
+      `${API_BASE}/api/v1/admin/sessions?skip=0&limit=100&agent_id=${agent.id}&status=handoff_requested`,
       { headers: authHeaders },
     );
     const sessionsData = await sessionsRes.json();
@@ -51,14 +69,16 @@ test.describe('Admin Sessions Takeover', () => {
     const session = sessionsData.items.find((s: any) => s.session_id === sessionId);
     expect(session).toBeTruthy();
 
-    // 5. Admin takes over the session
+    expect(session.status).toBe('handoff_requested');
+
+    // 6. Admin takes over the session
     const takeoverRes = await request.post(
       `${API_BASE}/api/v1/admin/sessions/${session.id}/takeover`,
       { headers: authHeaders },
     );
     expect([200, 201]).toContain(takeoverRes.status());
 
-    // 6. Admin sends human reply
+    // 7. Admin sends human reply
     const sendRes = await request.post(`${API_BASE}/api/v1/admin/sessions/send`, {
       headers: authHeaders,
       data: {
@@ -68,7 +88,7 @@ test.describe('Admin Sessions Takeover', () => {
     });
     expect([200, 201]).toContain(sendRes.status());
 
-    // 7. Visitor (public client) polls for assistant messages
+    // 8. Visitor (public client) polls for assistant messages
     const messagesRes = await request.get(
       `${API_BASE}/api/v1/chat/messages?session_id=${sessionId}&role=assistant`,
     );
@@ -104,6 +124,15 @@ test.describe('Admin Sessions Takeover', () => {
     });
     expect(chatRes.status()).toBe(200);
 
+    const handoffRes = await request.post(`${API_BASE}/api/v1/chat/handoff`, {
+      data: {
+        agent_id: agent.id,
+        session_id: sessionId,
+        locale: 'en-US',
+      },
+    });
+    expect(handoffRes.status()).toBe(200);
+
     // 2. Login to admin dashboard using shared helper
     await adminLogin(page);
 
@@ -124,5 +153,10 @@ test.describe('Admin Sessions Takeover', () => {
     // 5. Verify sessions page renders content with bilingual assertions
     await expect(page.getByRole('heading', { name: /会话中心|Sessions Center/i })).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText(new RegExp(`会话 #${sessionId}|Session #${sessionId}`))).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/等待人工|Needs Human/i).first()).toBeVisible({ timeout: 10_000 });
+    await page.screenshot({
+      path: '../../screenshots/admin-handoff-queue.png',
+      fullPage: true,
+    });
   });
 });

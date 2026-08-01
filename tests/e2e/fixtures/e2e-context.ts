@@ -20,11 +20,8 @@ export type E2EAgentContext = {
   baseUrl: string;
 };
 
-/**
- * Generate headers with random IP for rate limit bypass.
- */
 export function loginHeaders(): Record<string, string> {
-  return { 'X-Forwarded-For': `203.0.113.${Math.floor(Math.random() * 200) + 20}` };
+  return {};
 }
 
 /**

@@ -11,18 +11,8 @@ const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "test@example.com";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "testpassword123";
 const API_BASE = process.env.API_BASE_URL || "http://localhost:8000";
 
-/**
- * Generate headers with random IP for rate limit bypass.
- */
-function loginHeaders(): Record<string, string> {
-	return {
-		"X-Forwarded-For": `203.0.113.${Math.floor(Math.random() * 200) + 20}`,
-	};
-}
-
 async function getAdminToken(request: any): Promise<string> {
 	const loginRes = await request.post(`${API_BASE}/api/admin/login`, {
-		headers: loginHeaders(),
 		data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
 	});
 	const data = await loginRes.json();

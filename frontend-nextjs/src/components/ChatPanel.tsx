@@ -4,6 +4,7 @@ import { useRef, useEffect, memo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Source, UsageInfo } from "../services/api";
 import { formatAssistantMessageContent } from "../utils/citations";
+import { CitationList } from "./CitationList";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
 export interface Message {
@@ -89,63 +90,6 @@ function LoadingDots() {
 					animation: "bounce 1.4s ease-in-out 0.32s infinite both",
 				}}
 			/>
-		</div>
-	);
-}
-
-function ReferenceList({
-	references,
-}: {
-	references: Array<{ title: string; url: string }>;
-}) {
-	const { t } = useTranslation("common");
-
-	if (references.length === 0) {
-		return null;
-	}
-
-	return (
-		<div
-			style={{
-				marginTop: "var(--space-3)",
-				paddingTop: "var(--space-3)",
-				borderTop: "1px solid var(--color-border)",
-			}}
-		>
-			<div
-				style={{
-					fontSize: "var(--text-xs)",
-					fontWeight: 600,
-					color: "var(--color-text-muted)",
-					marginBottom: "var(--space-2)",
-				}}
-			>
-				{t("citations.references")}
-			</div>
-			<div
-				style={{
-					display: "flex",
-					flexDirection: "column",
-					gap: "var(--space-2)",
-				}}
-			>
-				{references.map((reference) => (
-					<a
-						key={reference.url}
-						href={reference.url}
-						target="_blank"
-						rel="noopener noreferrer"
-						style={{
-							color: "var(--color-accent-primary)",
-							fontSize: "var(--text-sm)",
-							fontWeight: 500,
-							wordBreak: "break-word",
-						}}
-					>
-						{reference.title}
-					</a>
-				))}
-			</div>
 		</div>
 	);
 }
@@ -547,7 +491,7 @@ function ChatPanel({
 																				msg.content
 																			}
 																		/>
-																		<ReferenceList
+																		<CitationList
 																			references={
 																				formattedAssistantContent?.references ??
 																				[]

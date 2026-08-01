@@ -56,6 +56,7 @@ class SourceItem(BaseModel):
     url: Optional[str] = Field(None, description="URL（URL类型）")
     snippet: Optional[str] = Field(None, description="摘要片段")
     filename: Optional[str] = Field(None, description="文件名（文件类型）")
+    doc_id: Optional[str] = Field(None, description="知识库文档ID（文件类型）")
 
 
 class UsageInfo(BaseModel):
@@ -75,6 +76,26 @@ class ChatResponse(BaseModel):
     session_id: Optional[str] = Field(None, description="会话ID")
     message_id: Optional[int] = Field(None, description="消息ID")
     taken_over: bool = Field(False, description="会话是否已被人工接管")
+    handoff_requested: bool = Field(False, description="访客是否正在等待人工接管")
+
+
+class HandoffRequest(BaseModel):
+    """访客请求人工客服。"""
+
+    agent_id: str = Field(..., description="Agent ID")
+    session_id: str = Field(..., min_length=1, max_length=200, description="会话ID")
+    visitor_id: Optional[str] = Field(None, max_length=100, description="访客标识")
+    locale: Optional[str] = Field(None, description="语言代码")
+
+
+class HandoffResponse(BaseModel):
+    """访客请求人工客服结果。"""
+
+    success: bool = True
+    status: Literal["handoff_requested", "taken_over"]
+    created: bool = False
+    message: str
+    message_id: Optional[int] = None
 
 
 class ContextRequest(BaseModel):
