@@ -331,6 +331,10 @@ def run_sqlite_migrations(database_url: str) -> None:
                             f"✓ Backfilled workspace_id for {cursor.rowcount} agent(s) with NULL workspace_id"
                         )
 
+        # ── restricted agent runtime ──────────────────────────────────────
+        if _table_exists(cursor, "workspaces") and _table_exists(cursor, "agents"):
+            _migrate_agent_runtime(cursor)
+
         conn.commit()
 
     except Exception:
@@ -348,6 +352,140 @@ def _table_exists(cursor: sqlite3.Cursor, table: str) -> bool:
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
     )
     return cursor.fetchone() is not None
+
+
+def _migrate_agent_runtime(cursor: sqlite3.Cursor) -> None:
+    """Create the AGENT-02 runtime tables and indexes idempotently."""
+    cursor.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS agent_runs (
+            id VARCHAR(50) PRIMARY KEY,
+            workspace_id INTEGER NOT NULL,
+            agent_id VARCHAR(50) NOT NULL,
+            chat_session_id VARCHAR(50),
+            user_message_id INTEGER,
+            status VARCHAR(30) NOT NULL DEFAULT 'queued'
+                CHECK(status IN ('queued','running','waiting_for_user','waiting_for_approval','succeeded','failed','cancelled')),
+            intent VARCHAR(50),
+            current_step INTEGER,
+            max_steps INTEGER NOT NULL DEFAULT 8 CHECK(max_steps > 0),
+            idempotency_key VARCHAR(128),
+            trace_id VARCHAR(64) NOT NULL,
+            model_requests INTEGER NOT NULL DEFAULT 0,
+            tool_calls_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            error_code VARCHAR(100),
+            deadline_at DATETIME,
+            started_at DATETIME,
+            completed_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+            FOREIGN KEY(agent_id) REFERENCES agents(id),
+            FOREIGN KEY(chat_session_id) REFERENCES chat_sessions(id),
+            FOREIGN KEY(user_message_id) REFERENCES chat_messages(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_workspace_idempotency
+            ON agent_runs(workspace_id, idempotency_key);
+        CREATE INDEX IF NOT EXISTS ix_agent_runs_workspace_id ON agent_runs(workspace_id);
+        CREATE INDEX IF NOT EXISTS ix_agent_runs_agent_id ON agent_runs(agent_id);
+        CREATE INDEX IF NOT EXISTS ix_agent_runs_chat_session_id ON agent_runs(chat_session_id);
+        CREATE INDEX IF NOT EXISTS ix_agent_runs_user_message_id ON agent_runs(user_message_id);
+        CREATE INDEX IF NOT EXISTS ix_agent_runs_status ON agent_runs(status);
+        CREATE INDEX IF NOT EXISTS ix_agent_runs_trace_id ON agent_runs(trace_id);
+        CREATE INDEX IF NOT EXISTS ix_agent_runs_workspace_status
+            ON agent_runs(workspace_id, status);
+        CREATE INDEX IF NOT EXISTS ix_agent_runs_agent_created
+            ON agent_runs(agent_id, created_at);
+        CREATE INDEX IF NOT EXISTS ix_agent_runs_session_created
+            ON agent_runs(chat_session_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS agent_steps (
+            id INTEGER PRIMARY KEY,
+            run_id VARCHAR(50) NOT NULL,
+            sequence INTEGER NOT NULL CHECK(sequence > 0),
+            step_type VARCHAR(30) NOT NULL
+                CHECK(step_type IN ('intent','plan','tool','verification','approval','response')),
+            status VARCHAR(20) NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','running','succeeded','failed','skipped','cancelled')),
+            input_summary JSON,
+            output_summary JSON,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            error_code VARCHAR(100),
+            started_at DATETIME,
+            completed_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_steps_run_sequence
+            ON agent_steps(run_id, sequence);
+        CREATE INDEX IF NOT EXISTS ix_agent_steps_run_id ON agent_steps(run_id);
+        CREATE INDEX IF NOT EXISTS ix_agent_steps_status ON agent_steps(status);
+
+        CREATE TABLE IF NOT EXISTS tool_calls (
+            id INTEGER PRIMARY KEY,
+            run_id VARCHAR(50) NOT NULL,
+            step_id INTEGER,
+            call_id VARCHAR(100) NOT NULL,
+            tool_name VARCHAR(100) NOT NULL,
+            tool_version VARCHAR(30) NOT NULL DEFAULT 'v1',
+            status VARCHAR(20) NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','running','succeeded','failed','cancelled')),
+            arguments_summary JSON,
+            result_summary JSON,
+            idempotency_key VARCHAR(128),
+            retryable BOOLEAN NOT NULL DEFAULT 0,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER,
+            error_code VARCHAR(100),
+            started_at DATETIME,
+            completed_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id),
+            FOREIGN KEY(step_id) REFERENCES agent_steps(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_tool_calls_run_call
+            ON tool_calls(run_id, call_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_tool_calls_run_idempotency
+            ON tool_calls(run_id, idempotency_key);
+        CREATE INDEX IF NOT EXISTS ix_tool_calls_run_id ON tool_calls(run_id);
+        CREATE INDEX IF NOT EXISTS ix_tool_calls_step_id ON tool_calls(step_id);
+        CREATE INDEX IF NOT EXISTS ix_tool_calls_tool_name ON tool_calls(tool_name);
+        CREATE INDEX IF NOT EXISTS ix_tool_calls_status ON tool_calls(status);
+
+        CREATE TABLE IF NOT EXISTS approval_requests (
+            id VARCHAR(50) PRIMARY KEY,
+            run_id VARCHAR(50) NOT NULL,
+            tool_call_id INTEGER UNIQUE,
+            action_type VARCHAR(100) NOT NULL,
+            risk_level VARCHAR(20) NOT NULL DEFAULT 'high'
+                CHECK(risk_level IN ('low','medium','high')),
+            request_summary JSON,
+            status VARCHAR(20) NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','approved','rejected','expired','cancelled')),
+            reviewer_id INTEGER,
+            decision_reason TEXT,
+            requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            decided_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id),
+            FOREIGN KEY(tool_call_id) REFERENCES tool_calls(id),
+            FOREIGN KEY(reviewer_id) REFERENCES admin_users(id)
+        );
+        CREATE INDEX IF NOT EXISTS ix_approval_requests_run_id
+            ON approval_requests(run_id);
+        CREATE INDEX IF NOT EXISTS ix_approval_requests_tool_call_id
+            ON approval_requests(tool_call_id);
+        CREATE INDEX IF NOT EXISTS ix_approval_requests_action_type
+            ON approval_requests(action_type);
+        CREATE INDEX IF NOT EXISTS ix_approval_requests_status
+            ON approval_requests(status);
+        CREATE INDEX IF NOT EXISTS ix_approval_requests_run_status
+            ON approval_requests(run_id, status);
+        """
+    )
 
 
 # ---- agents migration -------------------------------------------------------

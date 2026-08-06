@@ -122,6 +122,10 @@ async def init_db():
             KbChunk,
             IndexJob,
             AdminUser,
+            AgentRun,
+            AgentStep,
+            ToolCall,
+            ApprovalRequest,
         )
 
         await conn.run_sync(Base.metadata.create_all)

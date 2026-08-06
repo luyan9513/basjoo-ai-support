@@ -769,6 +769,113 @@ class SessionListResponse(BaseModel):
     total: int
 
 
+# ========== Agent Runtime Schemas ==========
+
+
+AgentRunStatus = Literal[
+    "queued",
+    "running",
+    "waiting_for_user",
+    "waiting_for_approval",
+    "succeeded",
+    "failed",
+    "cancelled",
+]
+
+
+class AgentStepItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    sequence: int
+    step_type: str
+    status: str
+    input_summary: Optional[Dict[str, Any]] = None
+    output_summary: Optional[Dict[str, Any]] = None
+    attempt_count: int
+    error_code: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class ToolCallItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    step_id: Optional[int] = None
+    call_id: str
+    tool_name: str
+    tool_version: str
+    status: str
+    arguments_summary: Optional[Dict[str, Any]] = None
+    result_summary: Optional[Dict[str, Any]] = None
+    retryable: bool
+    attempt_count: int
+    duration_ms: Optional[int] = None
+    error_code: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class ApprovalRequestItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    tool_call_id: Optional[int] = None
+    action_type: str
+    risk_level: str
+    request_summary: Optional[Dict[str, Any]] = None
+    status: str
+    reviewer_id: Optional[int] = None
+    decision_reason: Optional[str] = None
+    requested_at: datetime
+    decided_at: Optional[datetime] = None
+
+
+class AgentRunItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: int
+    agent_id: str
+    chat_session_id: Optional[str] = None
+    user_message_id: Optional[int] = None
+    status: AgentRunStatus
+    intent: Optional[str] = None
+    current_step: Optional[int] = None
+    max_steps: int
+    trace_id: str
+    model_requests: int
+    tool_calls_count: int
+    input_tokens: int
+    output_tokens: int
+    error_code: Optional[str] = None
+    deadline_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentRunDetail(AgentRunItem):
+    steps: List[AgentStepItem] = Field(default_factory=list)
+    tool_calls: List[ToolCallItem] = Field(default_factory=list)
+    approval_requests: List[ApprovalRequestItem] = Field(default_factory=list)
+
+
+class AgentRunListResponse(BaseModel):
+    items: List[AgentRunItem]
+    total: int
+
+
+class ApprovalRequestListResponse(BaseModel):
+    items: List[ApprovalRequestItem]
+    total: int
+
+
 # ========== Auth Schemas ==========
 
 

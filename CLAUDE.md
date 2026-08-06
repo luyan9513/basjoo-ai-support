@@ -75,7 +75,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `Origin: null` is only allowed when `cors_allow_null_origin` is explicitly enabled in config; missing `Origin` headers should not receive wildcard CORS.
 - `backend/config.py` centralizes settings. Secrets can come from env vars or on-disk key files; missing/insecure `SECRET_KEY` values are auto-generated and persisted. The default widget agent ID is also persisted to `/app/data/.agent_id`, and can be overridden with `DEFAULT_AGENT_ID`.
 - `backend/database.py` sets up the async SQLAlchemy engine/sessionmaker and initializes default workspace/agent data using the configured persistent default agent ID.
-- `backend/models.py` is the system-of-record schema: workspace/agent config, URL knowledge sources, uploaded files, chat sessions/messages, quotas, index jobs, and admin users.
+- `backend/models.py` is the system-of-record schema: workspace/agent config, URL knowledge sources, uploaded files, chat sessions/messages, quotas, index jobs, admin users, and the restricted agent runtime records (`AgentRun`, `AgentStep`, `ToolCall`, `ApprovalRequest`).
+- `backend/services/agent_run_service.py` owns AgentRun scope checks, idempotent creation, the explicit state-transition table, compare-and-set updates, and sanitized step/tool/approval persistence. Keep this logic out of routers.
+- `backend/api/v1/agent_run_endpoints.py` exposes workspace-scoped admin list/detail/cancel and read-only approval endpoints. Public visitor run endpoints are intentionally absent until signed visitor identity exists.
+- `backend/sqlite_migrations.py` creates the agent runtime tables and indexes idempotently for existing SQLite databases; fresh databases use SQLAlchemy metadata creation.
 
 ### Chat, RAG, and indexing
 
@@ -123,6 +126,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Backend tests use `backend/tests/conftest.py` to force `BASJOO_TEST_MODE=1`, create isolated SQLite DBs under `backend/.pytest_dbs/`, and monkeypatch LLM integrations for most API tests.
 - Use the existing `client` fixture for authenticated admin API tests and `public_client` for unauthenticated/public-route coverage instead of building ad-hoc `AsyncClient` fixtures in individual test files.
+- Agent runtime tests are split across `test_agent_run_service.py`, `test_agent_run_endpoints.py`, and `test_agent_run_migration.py`. They cover state transitions, concurrent idempotency, database uniqueness, workspace/membership hiding, admin cancellation, approval reads, and repeated SQLite startup migration.
 - To test actual self-KB integration, run against the Docker dev stack with Qdrant.
 - Run tests locally via venv (not system python): `source venv/bin/activate && python3 -m pytest tests/ --ignore=tests/integration/`. The `--ignore` is needed because `tests/integration/test_service_clients.py` imports an unavailable module.
 - If a test depends on real Redis hostnames, the fixtures auto-fallback between container hostnames and localhost.

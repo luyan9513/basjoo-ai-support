@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Float,
     UniqueConstraint,
+    CheckConstraint,
     text,
 )
 from sqlalchemy.orm import relationship
@@ -59,6 +60,9 @@ class Workspace(Base):
     quotas = relationship("WorkspaceQuota", back_populates="workspace", uselist=False)
     admin_users = relationship("AdminUser", back_populates="workspace")
     tenants = relationship("Tenant", back_populates="workspace")
+    agent_runs = relationship(
+        "AgentRun", back_populates="workspace", cascade="all, delete-orphan"
+    )
 
 
 class Agent(Base):
@@ -210,6 +214,9 @@ class Agent(Base):
         "AgentMember", back_populates="agent", cascade="all, delete-orphan"
     )
     knowledge_base = relationship("KnowledgeBase", back_populates="agents")
+    agent_runs = relationship(
+        "AgentRun", back_populates="agent", cascade="all, delete-orphan"
+    )
 
 
 class URLSource(Base):
@@ -334,6 +341,7 @@ class ChatSession(Base):
     messages = relationship(
         "ChatMessage", back_populates="session", cascade="all, delete-orphan"
     )
+    agent_runs = relationship("AgentRun", back_populates="chat_session")
 
     # 索引
     __table_args__ = (
@@ -387,6 +395,243 @@ class ChatMessage(Base):
     # 索引
     __table_args__ = (
         Index("ix_chat_messages_session_created", "session_id", "created_at"),
+    )
+
+
+AGENT_RUN_STATUSES = (
+    "queued",
+    "running",
+    "waiting_for_user",
+    "waiting_for_approval",
+    "succeeded",
+    "failed",
+    "cancelled",
+)
+AGENT_STEP_STATUSES = (
+    "pending",
+    "running",
+    "succeeded",
+    "failed",
+    "skipped",
+    "cancelled",
+)
+AGENT_STEP_TYPES = (
+    "intent",
+    "plan",
+    "tool",
+    "verification",
+    "approval",
+    "response",
+)
+TOOL_CALL_STATUSES = ("pending", "running", "succeeded", "failed", "cancelled")
+APPROVAL_REQUEST_STATUSES = (
+    "pending",
+    "approved",
+    "rejected",
+    "expired",
+    "cancelled",
+)
+APPROVAL_RISK_LEVELS = ("low", "medium", "high")
+
+
+def _quoted_values(values: tuple[str, ...]) -> str:
+    return ",".join(f"'{value}'" for value in values)
+
+
+class AgentRun(Base):
+    """One auditable execution of the restricted customer-service agent."""
+
+    __tablename__ = "agent_runs"
+
+    id = Column(
+        String(50), primary_key=True, default=lambda: f"run_{uuid.uuid4().hex[:16]}"
+    )
+    workspace_id = Column(
+        Integer, ForeignKey("workspaces.id"), nullable=False, index=True
+    )
+    agent_id = Column(String(50), ForeignKey("agents.id"), nullable=False, index=True)
+    chat_session_id = Column(
+        String(50), ForeignKey("chat_sessions.id"), nullable=True, index=True
+    )
+    user_message_id = Column(
+        Integer, ForeignKey("chat_messages.id"), nullable=True, index=True
+    )
+    status = Column(String(30), nullable=False, default="queued", index=True)
+    intent = Column(String(50), nullable=True, index=True)
+    current_step = Column(Integer, nullable=True)
+    max_steps = Column(Integer, nullable=False, default=8)
+    idempotency_key = Column(String(128), nullable=True)
+    trace_id = Column(
+        String(64), nullable=False, default=lambda: uuid.uuid4().hex, index=True
+    )
+    model_requests = Column(Integer, nullable=False, default=0)
+    tool_calls_count = Column(Integer, nullable=False, default=0)
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    error_code = Column(String(100), nullable=True)
+    deadline_at = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    workspace = relationship("Workspace", back_populates="agent_runs")
+    agent = relationship("Agent", back_populates="agent_runs")
+    chat_session = relationship("ChatSession", back_populates="agent_runs")
+    user_message = relationship("ChatMessage")
+    steps = relationship(
+        "AgentStep",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="AgentStep.sequence",
+    )
+    tool_calls = relationship(
+        "ToolCall",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="ToolCall.id",
+    )
+    approval_requests = relationship(
+        "ApprovalRequest",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="ApprovalRequest.created_at",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_agent_runs_workspace_idempotency",
+        ),
+        CheckConstraint(
+            f"status IN ({_quoted_values(AGENT_RUN_STATUSES)})",
+            name="ck_agent_runs_status",
+        ),
+        CheckConstraint("max_steps > 0", name="ck_agent_runs_max_steps"),
+        Index("ix_agent_runs_workspace_status", "workspace_id", "status"),
+        Index("ix_agent_runs_agent_created", "agent_id", "created_at"),
+        Index("ix_agent_runs_session_created", "chat_session_id", "created_at"),
+    )
+
+
+class AgentStep(Base):
+    """An ordered, sanitized state-machine step within an AgentRun."""
+
+    __tablename__ = "agent_steps"
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(String(50), ForeignKey("agent_runs.id"), nullable=False, index=True)
+    sequence = Column(Integer, nullable=False)
+    step_type = Column(String(30), nullable=False)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    input_summary = Column(JSON, nullable=True)
+    output_summary = Column(JSON, nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    error_code = Column(String(100), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    run = relationship("AgentRun", back_populates="steps")
+    tool_calls = relationship("ToolCall", back_populates="step")
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence", name="uq_agent_steps_run_sequence"),
+        CheckConstraint("sequence > 0", name="ck_agent_steps_sequence"),
+        CheckConstraint(
+            f"step_type IN ({_quoted_values(AGENT_STEP_TYPES)})",
+            name="ck_agent_steps_type",
+        ),
+        CheckConstraint(
+            f"status IN ({_quoted_values(AGENT_STEP_STATUSES)})",
+            name="ck_agent_steps_status",
+        ),
+    )
+
+
+class ToolCall(Base):
+    """A sanitized tool invocation record. Raw secrets and payloads are not stored."""
+
+    __tablename__ = "tool_calls"
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(String(50), ForeignKey("agent_runs.id"), nullable=False, index=True)
+    step_id = Column(Integer, ForeignKey("agent_steps.id"), nullable=True, index=True)
+    call_id = Column(String(100), nullable=False)
+    tool_name = Column(String(100), nullable=False, index=True)
+    tool_version = Column(String(30), nullable=False, default="v1")
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    arguments_summary = Column(JSON, nullable=True)
+    result_summary = Column(JSON, nullable=True)
+    idempotency_key = Column(String(128), nullable=True)
+    retryable = Column(Boolean, nullable=False, default=False)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    duration_ms = Column(Integer, nullable=True)
+    error_code = Column(String(100), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    run = relationship("AgentRun", back_populates="tool_calls")
+    step = relationship("AgentStep", back_populates="tool_calls")
+    approval_request = relationship(
+        "ApprovalRequest", back_populates="tool_call", uselist=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "call_id", name="uq_tool_calls_run_call"),
+        UniqueConstraint(
+            "run_id", "idempotency_key", name="uq_tool_calls_run_idempotency"
+        ),
+        CheckConstraint(
+            f"status IN ({_quoted_values(TOOL_CALL_STATUSES)})",
+            name="ck_tool_calls_status",
+        ),
+    )
+
+
+class ApprovalRequest(Base):
+    """Human decision required before a high-risk side effect may run."""
+
+    __tablename__ = "approval_requests"
+
+    id = Column(
+        String(50), primary_key=True, default=lambda: f"apr_{uuid.uuid4().hex[:16]}"
+    )
+    run_id = Column(String(50), ForeignKey("agent_runs.id"), nullable=False, index=True)
+    tool_call_id = Column(
+        Integer, ForeignKey("tool_calls.id"), nullable=True, unique=True, index=True
+    )
+    action_type = Column(String(100), nullable=False, index=True)
+    risk_level = Column(String(20), nullable=False, default="high")
+    request_summary = Column(JSON, nullable=True)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    reviewer_id = Column(Integer, ForeignKey("admin_users.id"), nullable=True)
+    decision_reason = Column(Text, nullable=True)
+    requested_at = Column(DateTime(timezone=True), server_default=func.now())
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    run = relationship("AgentRun", back_populates="approval_requests")
+    tool_call = relationship("ToolCall", back_populates="approval_request")
+    reviewer = relationship("AdminUser")
+
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_quoted_values(APPROVAL_REQUEST_STATUSES)})",
+            name="ck_approval_requests_status",
+        ),
+        CheckConstraint(
+            f"risk_level IN ({_quoted_values(APPROVAL_RISK_LEVELS)})",
+            name="ck_approval_requests_risk",
+        ),
+        Index("ix_approval_requests_run_status", "run_id", "status"),
     )
 
 
