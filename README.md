@@ -5,7 +5,6 @@
 [![Next.js](https://img.shields.io/badge/Next.js-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 [![Qdrant](https://img.shields.io/badge/Qdrant-Vector_Search-blue)](https://qdrant.tech/)
 [![Scrapling](https://img.shields.io/badge/Scrapling-Web_Crawling-green)](https://github.com/D4Vinci/Scrapling)
@@ -18,13 +17,13 @@ Basjoo is an AI customer-support platform with three main parts:
 - a **Next.js admin/dashboard frontend** in `frontend-nextjs/`
 - an **embeddable chat widget** in `widget/` that talks to the backend over HTTP and SSE
 
-The stack also uses **SQLite** for application data, **Redis** for rate limiting, **Qdrant** for vector search and document indexing, **PostgreSQL** for relational data, a **Scrapling microservice** for web content fetching, and **nginx** for Docker-based reverse proxying.
+The stack uses **SQLite** for application data, **Redis** for rate limiting, **Qdrant** for vector search and document indexing, a **Scrapling microservice** for web content fetching, and **nginx** for Docker-based reverse proxying. Docker Compose also starts a PostgreSQL/pgvector service in its dev and prod profiles, but the backend is not wired to it and no PostgreSQL driver is installed.
 
-## System requirements
+## Suggested environment
 
-Basjoo runs as a set of Docker containers. All LLM inference and embedding calls are made to external APIs (OpenAI, DeepSeek, Anthropic, Gemini, Jina, SiliconFlow), so **no GPU is required**.
+Basjoo runs as a set of Docker containers. All LLM inference and embedding calls are made to external APIs (OpenAI, DeepSeek, Anthropic, Gemini, Jina, SiliconFlow), so **no GPU is required**. The figures below are practical starting points, not benchmarked production minimums.
 
-| | Minimum | Recommended |
+| | Starting point | Comfortable local setup |
 |---|---|---|
 | CPU | 2 vCPU | 2–4 vCPU |
 | RAM | 4 GB | 8 GB |
@@ -37,7 +36,8 @@ Basjoo runs as a set of Docker containers. All LLM inference and embedding calls
 For a blank Ubuntu or Debian server, run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/haoyiyin/basjoo/main/install-deploy.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/luyan9513/basjoo-rag-saas/main/install-deploy.sh | \
+  sudo env BASJOO_REPO_URL=https://github.com/luyan9513/basjoo-rag-saas BASJOO_BRANCH=main sh
 ```
 
 If you already have this repository checked out locally, you can also run:
@@ -63,7 +63,7 @@ The first registered admin becomes the workspace super administrator, who can cr
 ## Core features
 
 - Configurable AI agents with multiple provider settings
-- Independent Embedding API selection for knowledge retrieval: Jina or SiliconFlow
+- Independent Embedding API selection for knowledge retrieval: Jina, SiliconFlow, or a custom OpenAI-compatible endpoint
 - URL ingestion and file knowledge management
 - Self-KB retrieval (Qdrant-backed) and document indexing via KB pipeline
 - Streaming chat responses over Server-Sent Events
@@ -72,7 +72,10 @@ The first registered admin becomes the workspace super administrator, who can cr
 - Per-agent widget domain whitelist for public chat embeds
 - Offline agent fallback replies and admin-side error alerts
 - Admin authentication and dashboard management flows
+- Persistent agent-runtime foundation for runs, ordered steps, sanitized tool-call records, approval requests, and workspace-scoped admin inspection/cancellation
 - Dockerized development and production-style deployment paths
+
+The runtime foundation does **not** yet make Basjoo a complete task agent. Public chat still uses the existing RAG response path; model-driven tool selection, the order/policy/ticket tool loop, approval decisions/resume, and end-to-end tracing are planned follow-up work.
 
 ## Feature walkthrough
 
@@ -96,7 +99,7 @@ The Websites page handles URL ingestion, crawling, auto-fetch settings, and retr
 
 ### File knowledge management
 
-The File Upload page lets you drag-and-drop PDF, TXT, CSV, Markdown, DOCX and other files as knowledge sources for AI retrieval.
+The File Upload page accepts TXT, Markdown, HTML, PDF, DOCX, and XLSX files as knowledge sources for AI retrieval.
 
 ![English file upload screenshot](resource/screenshots/admin/en-US/files.png)
 
@@ -131,8 +134,8 @@ The widget provides the visitor-facing chat window with persisted sessions, mult
 - FastAPI
 - SQLAlchemy async + SQLite
 - Redis (rate limiting, caching)
-- Qdrant REST API (vector search, document ingestion, hybrid retrieval)
-- PostgreSQL (application data persistence)
+- Qdrant client/API (dense vector search, document indexing, and tenant/KB payload filtering)
+- PostgreSQL/pgvector Compose service (started by dev/prod profiles but currently not used by the backend)
 - Scrapling microservice (curl_cffi + readability-lxml web content extraction)
 - APScheduler
 - Provider SDKs for OpenAI-compatible APIs, Anthropic, and Google Gemini
@@ -179,7 +182,7 @@ Default dev ports:
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:8000`
 - Qdrant: `http://localhost:6333`
-- PostgreSQL: `127.0.0.1:5432`
+- PostgreSQL Compose service: `127.0.0.1:5432` (started by dev/prod profiles; not used by the backend)
 - Redis: `127.0.0.1:6379`
 
 The dev frontend and backend ports are bound as `3000:3000` and `8000:8000`, so they are reachable from other devices that can access the host.
@@ -313,14 +316,14 @@ Notes:
 
 - auth routes under `/api/admin`
 - v1 APIs under `/api/v1` (chat, agent config, sessions, quotas, task status)
-- admin-only routers: `url_endpoints.py` (URL ingestion, crawling), `file_endpoints.py` (file upload), and `index_endpoints.py` (index rebuild jobs) are protected at the router level via `Depends(get_current_admin)`
+- the main legacy/compatibility v1 routes in `backend/api/v1/endpoints.py`, tenant-scoped KB document routes in `kb_document_endpoints.py`, and workspace-scoped runtime admin routes in `agent_run_endpoints.py`
 - public v1 routes: `/api/v1/chat`, `/api/v1/chat/stream`, `/api/v1/contexts`, `/api/v1/config:public`
 - CORS middleware with a shared `apply_cors_headers()` helper for early responses (rate limit 429, body size 413)
 - i18n middleware
 - rate limiting middleware
 - Redis and scheduler startup in non-test mode
 - static routes for widget assets like `/sdk.js`
-- a 10MB request body guard that returns JSON 413 errors before the request reaches downstream handlers
+- a 10 MiB default body guard for non-upload routes; upload routes allow up to five 20 MiB files plus multipart overhead at the FastAPI layer
 
 The main backend domains are:
 
@@ -328,6 +331,7 @@ The main backend domains are:
 - **Knowledge sources**: URLs and uploaded files, with SSRF protection via `backend/services/url_safety.py`
 - **Indexing**: chunking content and storing in per-tenant Qdrant collections for data isolation
 - **Chat**: session creation, streaming replies, source citations, quota checks
+- **Agent runtime foundation**: persistent runs, ordered steps, sanitized tool-call/approval records, explicit state transitions, workspace/membership authorization, and admin inspection/cancellation
 - **Admin auth**: dashboard login and registration
 - **Scheduling**: URL fetch scheduler, history cleanup, session auto-close (30-min inactivity timeout)
 
@@ -340,23 +344,36 @@ The main persistent entities in `backend/models.py` are:
 - `ChatSession`
 - `ChatMessage`
 - `WorkspaceQuota`
+- `AgentMember`
 - `IndexJob`
 - `AdminUser`
+- `Tenant`
+- `KnowledgeBase`
+- `KbDocument`
+- `KbChunk`
+- `AgentRun`
+- `AgentStep`
+- `ToolCall`
+- `ApprovalRequest`
 
 ### Retrieval and provider layer
 
 The retrieval/indexing pipeline spans:
 
-- `backend/api/v1/url_endpoints.py`
-- `backend/api/v1/index_endpoints.py`
+- `backend/api/v1/endpoints.py` (legacy/compatibility URL and index routes)
+- `backend/api/v1/kb_document_endpoints.py` (tenant-scoped document routes)
+- `backend/services/kb_document_processor.py`
+- `backend/services/kb_retrieval_service.py`
 - `backend/services/kb_service.py`
 - `backend/services/qdrant_service.py`
 - `backend/services/scraper.py`
 - `backend/services/crawler.py`
 
+Agent runtime persistence and transition rules live in `backend/services/agent_run_service.py`; the corresponding admin router is `backend/api/v1/agent_run_endpoints.py`. Public visitor run endpoints are intentionally absent until signed visitor identity is implemented.
+
 The LLM abstraction is in `backend/services/llm_service.py`. Provider selection is driven by `Agent.provider_type`. The current code supports OpenAI-compatible providers plus dedicated paths for OpenAI Native and Google.
 
-Embedding settings are independent from the chat model provider. Admins can choose Jina or SiliconFlow for knowledge-base indexing/retrieval in Playground; the Websites and File Upload pages only require the API key for the currently selected embedding provider. SiliconFlow can use a dedicated SiliconFlow Embedding API key, with legacy fallback to the main SiliconFlow AI key when the AI provider is also SiliconFlow.
+Embedding settings are independent from the chat model provider. Admins can choose Jina, SiliconFlow, or a custom OpenAI-compatible endpoint for knowledge-base indexing/retrieval; the UI only requires the configuration for the selected provider. SiliconFlow can use a dedicated SiliconFlow Embedding API key, with legacy fallback to the main SiliconFlow AI key when the AI provider is also SiliconFlow.
 
 ### Frontend
 
@@ -419,11 +436,20 @@ Run a single test:
 pytest tests/test_api.py::test_name
 ```
 
+Run the agent-runtime foundation tests:
+
+```bash
+pytest -q \
+  tests/test_agent_run_service.py \
+  tests/test_agent_run_endpoints.py \
+  tests/test_agent_run_migration.py
+```
+
 ## Deployment notes
 
 - `docker-compose.yml` is the main orchestration entrypoint.
 - `install-deploy.sh` is the one-command production installer/deployer for Ubuntu and Debian. It can auto-install Docker/Compose, clone the repo, and force-sync an existing clone to the chosen remote branch before deploying.
-- nginx is configured with `client_max_body_size 12m` so oversized requests can reach the backend and return JSON errors instead of nginx HTML errors.
+- nginx currently sets `client_max_body_size 12m`. This is enough for payloads just above the backend's 10 MiB default limit to receive its JSON 413 response, but it also means proxied uploads are capped below the backend's 20 MiB per-file allowance.
 - Optional HTTPS is enabled only when readable certificate and key files exist in `./ssl`.
 - When certificates are present, nginx serves HTTPS on port 443 and redirects HTTP requests on port 80 to HTTPS automatically.
 - `SERVER_DOMAIN` can be set for the nginx service to enforce a canonical hostname. When set, nginx serves only that host, rejects direct IP or unexpected Host access with nginx 444, and keeps `/health` available for load balancer probes.
@@ -467,6 +493,10 @@ Examples of backend endpoints present in the codebase:
 - `/api/v1/urls:refetch`
 - `/api/v1/index:rebuild`
 - `/api/v1/index:status`
+- `/api/v1/admin/agent-runs`
+- `/api/v1/admin/agent-runs/{run_id}`
+- `/api/v1/admin/agent-runs/{run_id}/cancel`
+- `/api/v1/admin/approval-requests`
 
 ## Acknowledgments
 
@@ -476,17 +506,6 @@ Basjoo is built on top of these amazing open-source projects:
 - **[Scrapling](https://github.com/D4Vinci/Scrapling)** — Stealthy web scraping with TLS fingerprint impersonation (curl_cffi). Powers Basjoo's URL content extraction microservice.
 - **[FastAPI](https://github.com/tiangolo/fastapi)** — The web framework powering Basjoo's backend APIs.
 - **[Next.js](https://github.com/vercel/next.js)** — The React framework powering Basjoo's admin dashboard.
-- **[pgvector](https://github.com/pgvector/pgvector)** — Open-source vector similarity search for PostgreSQL.
-
-## Contributors
-
-<a href="https://github.com/haoyiyin/basjoo/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=haoyiyin/basjoo" />
-</a>
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=haoyiyin/basjoo&type=Date)](https://star-history.com/#haoyiyin/basjoo&Date)
 
 ## Current status
 

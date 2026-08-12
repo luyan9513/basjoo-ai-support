@@ -5,7 +5,6 @@
 [![Next.js](https://img.shields.io/badge/Next.js-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 [![Qdrant](https://img.shields.io/badge/Qdrant-向量检索-blue)](https://qdrant.tech/)
 [![Scrapling](https://img.shields.io/badge/Scrapling-网页抓取-green)](https://github.com/D4Vinci/Scrapling)
@@ -22,14 +21,14 @@ Basjoo 是一个面向 AI 客服场景的平台，主要由三部分组成：
 - **Redis**：限流、缓存相关能力
 - **Qdrant**：向量检索与文档索引（自研多租户 KB）
 - **Scrapling 微服务**：网页内容抓取（curl_cffi + readability-lxml）
-- **PostgreSQL**：应用数据持久化存储
+- **PostgreSQL/pgvector**：Compose 的 dev/prod profile 会启动该服务；当前后端未接入，也未安装 PostgreSQL 驱动
 - **nginx**：Docker 部署下的反向代理
 
-## 系统要求
+## 建议运行环境
 
-Basjoo 以 Docker 容器方式运行。所有 LLM 推理和 Embedding 调用均走外部 API（OpenAI、DeepSeek、Anthropic、Gemini、Jina、SiliconFlow），**无需 GPU**。
+Basjoo 以 Docker 容器方式运行。所有 LLM 推理和 Embedding 调用均走外部 API（OpenAI、DeepSeek、Anthropic、Gemini、Jina、SiliconFlow），**无需 GPU**。下表只是当前 Docker 结构下的实用起点，不是经过压测的生产最低配置。
 
-| | 最低配置 | 推荐配置 |
+| | 起步配置 | 较宽松的本地配置 |
 |---|---|---|
 | CPU | 2 vCPU | 2–4 vCPU |
 | 内存 | 4 GB | 8 GB |
@@ -42,7 +41,8 @@ Basjoo 以 Docker 容器方式运行。所有 LLM 推理和 Embedding 调用均�
 对于一台全新的 Ubuntu 或 Debian 服务器，可直接执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/haoyiyin/basjoo/main/install-deploy.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/luyan9513/basjoo-rag-saas/main/install-deploy.sh | \
+  sudo env BASJOO_REPO_URL=https://github.com/luyan9513/basjoo-rag-saas BASJOO_BRANCH=main sh
 ```
 
 如果你已经在本地检出了仓库，也可以直接运行：
@@ -67,7 +67,7 @@ sudo sh install-deploy.sh
 ## 核心功能
 
 - 支持多种模型服务商配置的 AI 智能体
-- 支持独立选择知识检索 Embedding API：Jina 或 SiliconFlow
+- 支持独立选择知识检索 Embedding API：Jina、SiliconFlow 或自定义 OpenAI 兼容端点
 - URL 抓取与文件知识管理
 - 自研 KB 检索（Qdrant）与文档索引
 - 基于 Server-Sent Events 的流式聊天回复
@@ -76,7 +76,10 @@ sudo sh install-deploy.sh
 - 面向公开聊天入口的按 Agent 配置的 Widget 域名白名单
 - 离线智能体兜底回复与管理端错误告警
 - 管理员认证与后台管理流程
+- Agent Runtime 持久化地基：run、有序 step、脱敏工具调用记录、审批请求，以及按 Workspace 授权的管理端查询和取消
 - Docker 化的开发和生产风格部署路径
+
+这层 Runtime 地基还不代表 Basjoo 已经是完整的任务型 Agent。公开聊天目前仍走现有 RAG 回复链路；模型驱动的工具选择、订单/规则/工单工具循环、审批决定与恢复、端到端 Trace 都是后续任务。
 
 ## 功能演示
 
@@ -100,7 +103,7 @@ Playground 页面可以测试回复效果、观察检索结果，并联动调整
 
 ### 文件知识管理
 
-文件上传页面支持拖拽上传 PDF、TXT、CSV、Markdown、DOCX 等文件，作为 AI 知识检索的来源。
+文件上传页面支持 TXT、Markdown、HTML、PDF、DOCX 和 XLSX 文件，作为 AI 知识检索的来源。
 
 ![文件上传截图](resource/screenshots/admin/zh-CN/files.png)
 
@@ -135,8 +138,8 @@ Widget 提供访客侧聊天入口，支持会话持久化、多语言文案、�
 - FastAPI
 - SQLAlchemy async + SQLite
 - Redis（限流、缓存）
-- Qdrant REST API（向量检索、文档摄入、混合检索）
-- PostgreSQL（应用数据持久化）
+- Qdrant 客户端/API（dense 向量检索、文档索引和 Tenant/KB payload 过滤）
+- PostgreSQL/pgvector Compose 服务（dev/prod profile 会启动，但当前后端未使用）
 - Scrapling 微服务（curl_cffi + readability-lxml 网页内容提取）
 - APScheduler
 - OpenAI 兼容接口、Anthropic、Google Gemini 等服务商 SDK
@@ -183,7 +186,7 @@ bash scripts/prod_stability_check.sh
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:8000`
 - Qdrant: `http://localhost:6333`
-- PostgreSQL: `127.0.0.1:5432`
+- PostgreSQL Compose 服务：`127.0.0.1:5432`（dev/prod profile 会启动；当前后端未使用）
 - Redis: `127.0.0.1:6379`
 
 开发环境前端和后端端口以 `3000:3000`、`8000:8000` 方式绑定，因此同一网络中可访问宿主机的其它设备也可以访问。
@@ -317,14 +320,14 @@ docker compose --profile dev up --watch
 
 - `/api/admin` 下的认证路由
 - `/api/v1` 下的业务 API（聊天、智能体配置、会话、配额、任务状态）
-- admin-only 路由：`url_endpoints.py`（URL 导入、抓取）、`file_endpoints.py`（文件上传）和 `index_endpoints.py`（索引重建任务）在 router 级别通过 `Depends(get_current_admin)` 进行管理员鉴权保护
+- `backend/api/v1/endpoints.py` 中的主要兼容业务路由、`kb_document_endpoints.py` 中按 Tenant 授权的知识库文档路由，以及 `agent_run_endpoints.py` 中按 Workspace 授权的 Runtime 管理路由
 - public v1 路由：`/api/v1/chat`、`/api/v1/chat/stream`、`/api/v1/contexts`、`/api/v1/config:public`
 - CORS 中间件，早返回响应（限流 429、请求体 413）通过共享 `apply_cors_headers()` 处理
 - i18n 中间件
 - 限流中间件
 - 非测试模式下的 Redis 和调度器启动逻辑
 - `/sdk.js` 等 widget 静态资源路由
-- 10MB 请求体保护：超过限制时直接返回 JSON 413，不再进入下游处理
+- 非上传路由默认使用 10 MiB 请求体保护；上传路由在 FastAPI 层允许最多 5 个、每个 20 MiB 的文件，并预留 multipart 开销
 
 后端的主要业务域包括：
 
@@ -332,6 +335,7 @@ docker compose --profile dev up --watch
 - **知识源**：URL 与文件上传，URL 导入经过 `backend/services/url_safety.py` 的 SSRF 防护校验
 - **索引**：内容切块并存储至按租户隔离的 Qdrant collection
 - **聊天**：会话创建、流式回复、来源引用、配额校验
+- **Agent Runtime 地基**：持久 run、有序 step、脱敏工具调用/审批记录、显式状态跳转、Workspace/membership 授权，以及管理端查询和取消
 - **管理认证**：后台登录与注册
 - **定时任务**：URL 抓取调度、历史清理、会话自动关闭（30 分钟无活动超时）
 
@@ -344,23 +348,36 @@ docker compose --profile dev up --watch
 - `ChatSession`
 - `ChatMessage`
 - `WorkspaceQuota`
+- `AgentMember`
 - `IndexJob`
 - `AdminUser`
+- `Tenant`
+- `KnowledgeBase`
+- `KbDocument`
+- `KbChunk`
+- `AgentRun`
+- `AgentStep`
+- `ToolCall`
+- `ApprovalRequest`
 
 ### 检索与模型服务层
 
 检索与索引流程主要分布在：
 
-- `backend/api/v1/url_endpoints.py`
-- `backend/api/v1/index_endpoints.py`
+- `backend/api/v1/endpoints.py`（兼容 URL 与索引路由）
+- `backend/api/v1/kb_document_endpoints.py`（按 Tenant 授权的文档路由）
+- `backend/services/kb_document_processor.py`
+- `backend/services/kb_retrieval_service.py`
 - `backend/services/kb_service.py`
 - `backend/services/qdrant_service.py`
 - `backend/services/scraper.py`
 - `backend/services/crawler.py`
 
+Agent Runtime 的持久化和状态规则位于 `backend/services/agent_run_service.py`，对应管理路由位于 `backend/api/v1/agent_run_endpoints.py`。在签名访客身份完成前，项目有意不开放访客 run 查询/取消接口。
+
 模型服务抽象位于 `backend/services/llm_service.py`。服务商选择由 `Agent.provider_type` 决定。当前代码支持多种 OpenAI 兼容服务商，以及专门的 OpenAI Native 和 Google 路径。
 
-Embedding 设置与聊天模型服务商相互独立。管理员可以在 Playground 中为知识库索引/检索选择 Jina 或 SiliconFlow；网站与文件上传页面只要求当前已选择的 Embedding API 对应 Key 已配置。SiliconFlow 可以使用独立的 SiliconFlow Embedding API Key；当 AI 服务商也选择 SiliconFlow 时，也兼容使用主 SiliconFlow AI Key 作为历史回退。
+Embedding 设置与聊天模型服务商相互独立。管理员可以为知识库索引/检索选择 Jina、SiliconFlow 或自定义 OpenAI 兼容端点；界面只要求配置当前选中服务商所需的信息。SiliconFlow 可以使用独立的 SiliconFlow Embedding API Key；当 AI 服务商也选择 SiliconFlow 时，也兼容使用主 SiliconFlow AI Key 作为历史回退。
 
 ### 前端
 
@@ -423,11 +440,20 @@ pytest tests/test_api.py
 pytest tests/test_api.py::test_name
 ```
 
+运行 Agent Runtime 地基定向测试：
+
+```bash
+pytest -q \
+  tests/test_agent_run_service.py \
+  tests/test_agent_run_endpoints.py \
+  tests/test_agent_run_migration.py
+```
+
 ## 部署说明
 
 - `docker-compose.yml` 是当前的主要编排入口。
 - `install-deploy.sh` 是面向 Ubuntu/Debian 的一键生产部署脚本。可自动安装 Docker/Compose、clone 仓库、强制同步远端分支，并在部署前完成 `.env` 初始化。
-- nginx 已配置 `client_max_body_size 12m`，这样超大请求可以到达后端并返回 JSON 错误，而不是直接返回 nginx HTML 错误页。
+- nginx 当前配置 `client_max_body_size 12m`。这足以让略高于后端默认 10 MiB 上限的请求进入 FastAPI 并取得 JSON 413，但也会让经过 nginx 的文件上传低于后端单文件 20 MiB 的上限。
 - 只有当 `./ssl` 中存在可读证书和私钥时，才会启用可选 HTTPS。
 - 当证书存在时，nginx 会在 443 提供 HTTPS，并将 80 上的 HTTP 请求自动重定向到 HTTPS。
 - 可以为 nginx 设置 `SERVER_DOMAIN` 作为规范域名。设置后，nginx 只响应该域名；直接 IP 访问或其他 Host 请求会被 nginx 以 444 丢弃，同时保留 `/health` 供负载均衡探活使用。
@@ -469,6 +495,10 @@ DEFAULT_AGENT_ID=agt_123456789abc
 - `/api/v1/urls:refetch`
 - `/api/v1/index:rebuild`
 - `/api/v1/index:status`
+- `/api/v1/admin/agent-runs`
+- `/api/v1/admin/agent-runs/{run_id}`
+- `/api/v1/admin/agent-runs/{run_id}/cancel`
+- `/api/v1/admin/approval-requests`
 
 ## 致谢
 
@@ -478,17 +508,6 @@ Basjoo 基于以下优秀的开源项目构建：
 - **[Scrapling](https://github.com/D4Vinci/Scrapling)** — 隐身网页抓取，支持 TLS 指纹伪装（curl_cffi）。驱动 Basjoo 的 URL 内容提取微服务。
 - **[FastAPI](https://github.com/tiangolo/fastapi)** — 驱动 Basjoo 后端 API 的 Web 框架。
 - **[Next.js](https://github.com/vercel/next.js)** — 驱动 Basjoo 管理后台的 React 框架。
-- **[pgvector](https://github.com/pgvector/pgvector)** — PostgreSQL 开源向量相似性搜索。
-
-## 贡献者
-
-<a href="https://github.com/haoyiyin/basjoo/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=haoyiyin/basjoo" />
-</a>
-
-## Star 趋势
-
-[![Star History Chart](https://api.star-history.com/svg?repos=haoyiyin/basjoo&type=Date)](https://star-history.com/#haoyiyin/basjoo&Date)
 
 ## 当前说明
 
