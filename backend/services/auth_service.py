@@ -1,7 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+from pwdlib import PasswordHash
+from pwdlib.exceptions import UnknownHashError
+from pwdlib.hashers.argon2 import Argon2Hasher
+from pwdlib.hashers.bcrypt import BcryptHasher
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import logging
@@ -11,7 +14,16 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+password_hash = PasswordHash((Argon2Hasher(), BcryptHasher()))
+
+
+def _is_bcrypt_hash(hashed_password: str) -> bool:
+    return hashed_password.startswith(("$2a$", "$2b$", "$2y$"))
+
+
+def _legacy_bcrypt_password(password: str) -> str:
+    """Preserve the old UTF-8 72-byte canonicalization for existing hashes."""
+    return password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
 
 
 class AuthError(Exception):
@@ -47,15 +59,33 @@ class AuthService:
 
     @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
-        password_bytes = plain_password.encode("utf-8")[:72]
-        return pwd_context.verify(
-            password_bytes.decode("utf-8", errors="ignore"), hashed_password
+        password = (
+            _legacy_bcrypt_password(plain_password)
+            if _is_bcrypt_hash(hashed_password)
+            else plain_password
         )
+        try:
+            return password_hash.verify(password, hashed_password)
+        except (UnknownHashError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def verify_and_update_password(
+        plain_password: str, hashed_password: str
+    ) -> tuple[bool, str | None]:
+        try:
+            if _is_bcrypt_hash(hashed_password):
+                valid = password_hash.verify(
+                    _legacy_bcrypt_password(plain_password), hashed_password
+                )
+                return valid, password_hash.hash(plain_password) if valid else None
+            return password_hash.verify_and_update(plain_password, hashed_password)
+        except (UnknownHashError, TypeError, ValueError):
+            return False, None
 
     @staticmethod
     def hash_password(password: str) -> str:
-        password_bytes = password.encode("utf-8")[:72]
-        return pwd_context.hash(password_bytes.decode("utf-8", errors="ignore"))
+        return password_hash.hash(password)
 
     def create_access_token(
         self, data: dict, expires_delta: Optional[timedelta] = None
@@ -87,11 +117,18 @@ class AuthService:
         if not admin:
             raise AdminNotFoundError("No account found with this email")
 
-        if not self.verify_password(password, admin.hashed_password):
+        valid_password, updated_hash = self.verify_and_update_password(
+            password, admin.hashed_password
+        )
+        if not valid_password:
             raise AuthError("Incorrect password")
 
         if not admin.is_active:
             raise AdminDeactivatedError("Admin account is deactivated")
+
+        if updated_hash is not None:
+            admin.hashed_password = updated_hash
+            await self.db.commit()
 
         return admin
 

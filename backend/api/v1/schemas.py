@@ -74,6 +74,7 @@ class ChatResponse(BaseModel):
     sources: List[SourceItem] = Field(default_factory=list, description="引用来源")
     usage: Optional[UsageInfo] = Field(None, description="Token使用量")
     session_id: Optional[str] = Field(None, description="会话ID")
+    visitor_token: Optional[str] = Field(None, description="绑定当前访客会话的签名令牌")
     message_id: Optional[int] = Field(None, description="消息ID")
     taken_over: bool = Field(False, description="会话是否已被人工接管")
     handoff_requested: bool = Field(False, description="访客是否正在等待人工接管")

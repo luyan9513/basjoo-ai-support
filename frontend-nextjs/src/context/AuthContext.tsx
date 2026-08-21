@@ -103,7 +103,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 
 		setIsLoading(false);
-	}, []);
+	}, [logout]);
 
 	// Refresh admin role from the backend on mount so that role changes
 	// (e.g. readonly → support migration, role downgrade) are reflected

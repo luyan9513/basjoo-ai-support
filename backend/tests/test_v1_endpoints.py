@@ -7,6 +7,11 @@ import pytest
 from api.v1.endpoints import replace_source_placeholders
 
 
+def visitor_headers(chat_response, **extra):
+    token = chat_response.json()["visitor_token"]
+    return {"Authorization": f"Bearer {token}", **extra}
+
+
 def test_replace_source_placeholders_uses_only_url_sources():
     reply = "See [website](#source-1), [faq](#source-2), and [missing](#source-5)."
     sources = [
@@ -85,7 +90,8 @@ async def test_chat_messages_include_sources(public_client, default_agent_id):
     session_id = chat_response.json()["session_id"]
 
     messages_response = await public_client.get(
-        f"/api/v1/chat/messages?session_id={session_id}"
+        f"/api/v1/chat/messages?session_id={session_id}",
+        headers=visitor_headers(chat_response),
     )
     assert messages_response.status_code == 200
 
@@ -270,7 +276,8 @@ async def test_takeover_admin_reply_visible_via_public_polling(
     assert send_response.status_code == 200
 
     poll_response = await client.get(
-        f"/api/v1/chat/messages?session_id={business_session_id}&role=assistant"
+        f"/api/v1/chat/messages?session_id={business_session_id}&role=assistant",
+        headers=visitor_headers(chat_response),
     )
     assert poll_response.status_code == 200
     polled_messages = poll_response.json()
@@ -299,8 +306,13 @@ async def test_visitor_handoff_request_is_idempotent_and_visible_to_admin(
         "visitor_id": visitor_id,
         "locale": "en-US",
     }
-    first_request = await public_client.post("/api/v1/chat/handoff", json=payload)
-    repeated_request = await public_client.post("/api/v1/chat/handoff", json=payload)
+    headers = visitor_headers(chat_response)
+    first_request = await public_client.post(
+        "/api/v1/chat/handoff", json=payload, headers=headers
+    )
+    repeated_request = await public_client.post(
+        "/api/v1/chat/handoff", json=payload, headers=headers
+    )
 
     assert first_request.status_code == 200
     assert first_request.json()["status"] == "handoff_requested"
@@ -349,6 +361,7 @@ async def test_handoff_waiting_messages_skip_ai_then_admin_can_take_over(
 
     handoff_response = await public_client.post(
         "/api/v1/chat/handoff",
+        headers=visitor_headers(chat_response),
         json={
             "agent_id": default_agent_id,
             "session_id": business_session_id,
@@ -360,6 +373,7 @@ async def test_handoff_waiting_messages_skip_ai_then_admin_can_take_over(
 
     waiting_message = await public_client.post(
         "/api/v1/chat",
+        headers=visitor_headers(chat_response),
         json={
             "agent_id": default_agent_id,
             "message": "My order number is DEMO-1001",
@@ -419,6 +433,7 @@ async def test_handoff_request_rejects_mismatched_visitor(
 
     response = await public_client.post(
         "/api/v1/chat/handoff",
+        headers=visitor_headers(chat_response),
         json={
             "agent_id": default_agent_id,
             "session_id": business_session_id,
@@ -464,6 +479,7 @@ async def test_session_rate_limit_log_records_scope_without_raw_session_id(
     with caplog.at_level(logging.WARNING, logger="api.v1.endpoints"):
         limited_response = await public_client.post(
             "/api/v1/chat",
+            headers=visitor_headers(first_response),
             json={
                 "agent_id": default_agent_id,
                 "message": "Second message",
@@ -632,7 +648,9 @@ async def test_public_polling_blocks_unlisted_widget_origin(
 
     blocked_poll_response = await public_client.get(
         f"/api/v1/chat/messages?session_id={session_id}",
-        headers={"Referer": "https://blocked.example/page"},
+        headers=visitor_headers(
+            chat_response, Referer="https://blocked.example/page"
+        ),
     )
     assert blocked_poll_response.status_code == 403
     assert blocked_poll_response.json()["detail"] == "Widget origin not allowed"

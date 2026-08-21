@@ -5,12 +5,6 @@ const backendProxyTarget = process.env.BACKEND_PROXY_TARGET || 'http://localhost
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
-  typescript: {
-    ignoreBuildErrors: true,
-  },
   productionBrowserSourceMaps: false,
   async generateBuildId() {
     return `build-${Date.now()}`;
@@ -40,6 +34,10 @@ const nextConfig = {
       {
         source: '/health',
         destination: `${backendProxyTarget}/health`,
+      },
+      {
+        source: '/ready',
+        destination: `${backendProxyTarget}/ready`,
       }
     ];
   },

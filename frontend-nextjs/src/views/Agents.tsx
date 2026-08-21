@@ -1,6 +1,13 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import {
+	FormEvent,
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { useNavigate } from "react-router-dom";
 import AdminLayout from "../components/AdminLayout";
 import KBSetupWizard from "../components/KBSetupWizard";
@@ -83,6 +90,8 @@ export default function Agents() {
 	const [onboardingAgentId, setOnboardingAgentId] = useState<string | null>(
 		null,
 	);
+	const translationRef = useRef(t);
+	translationRef.current = t;
 	const { recheck: recheckOnboardingKbStatus } =
 		useAgentKbStatus(onboardingAgentId);
 	const selectedAgent = useMemo(
@@ -98,7 +107,7 @@ export default function Agents() {
 		Boolean(form.name.trim()) &&
 		agentNameDisplayWidth <= AGENT_NAME_MAX_DISPLAY_WIDTH;
 
-	const loadAgents = async () => {
+	const loadAgents = useCallback(async () => {
 		setLoading(true);
 		setError(null);
 		try {
@@ -115,15 +124,19 @@ export default function Agents() {
 				);
 			});
 		} catch (err) {
-			setError(err instanceof Error ? err.message : t("errors.networkError"));
+			setError(
+				err instanceof Error
+					? err.message
+					: translationRef.current("errors.networkError"),
+			);
 		} finally {
 			setLoading(false);
 		}
-	};
+	}, []);
 
 	useEffect(() => {
 		loadAgents();
-	}, []);
+	}, [loadAgents]);
 
 	useEffect(() => {
 		const timer = window.setInterval(

@@ -25,6 +25,7 @@ export interface ChatResponse {
 	sources: Source[];
 	usage?: UsageInfo;
 	session_id?: string;
+	visitor_token?: string;
 	message_id?: number;
 	taken_over?: boolean;
 }
@@ -32,6 +33,7 @@ export interface ChatResponse {
 export interface StreamDoneMeta {
 	message_id: number | null;
 	session_id?: string;
+	visitor_token?: string;
 	usage?: UsageInfo | null;
 	taken_over?: boolean;
 }

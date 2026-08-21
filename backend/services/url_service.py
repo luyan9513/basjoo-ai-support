@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from models import URLSource, normalize_url, Agent
 from api.v1.schemas import URLCreateRequest, URLItem, URLListResponse
 from database import AsyncSessionLocal
+from services.url_safety import url_log_reference
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,8 @@ async def process_url_refetch(
                 safe, reason = validate_url_safe(url)
                 if not safe:
                     logger.warning(
-                        f"[URL Refetch] Unsafe URL skipped: {url} - {reason}"
+                        "[URL Refetch] Unsafe URL skipped %s: %s",
+                        url_log_reference(url), reason,
                     )
                     url_source.status = "failed"
                     url_source.last_error = f"URL safety check failed: {reason}"
@@ -203,7 +205,8 @@ async def process_url_refetch(
 
                     if page_result.error:
                         logger.warning(
-                            f"[URL Refetch] Failed to fetch {url}: {page_result.error}"
+                            "[URL Refetch] Failed to fetch %s",
+                            url_log_reference(url),
                         )
                         url_source.status = "failed"
                         url_source.last_error = page_result.error
@@ -217,7 +220,8 @@ async def process_url_refetch(
                     content_hash = compute_content_hash(page_result.content or "")
                     if not force and url_source.content_hash == content_hash:
                         logger.info(
-                            f"[URL Refetch] Content unchanged for {url}, skipping"
+                            "[URL Refetch] Content unchanged for %s, skipping",
+                            url_log_reference(url),
                         )
                         url_source.status = "success"
                         url_source.last_fetch_at = datetime.now(timezone.utc)
@@ -237,7 +241,10 @@ async def process_url_refetch(
 
                     # Check cancellation before indexing
                     if _is_cancelled():
-                        logger.info(f"[URL Refetch] Job {job_id} cancelled before indexing {url}")
+                        logger.info(
+                            "[URL Refetch] Job %s cancelled before indexing %s",
+                            job_id, url_log_reference(url),
+                        )
                         return
 
                     # Index to KB: Create a virtual document for the URL content
@@ -290,15 +297,23 @@ async def process_url_refetch(
                     else:
                         url_source.is_indexed = False
                         logger.warning(
-                            f"[URL Refetch] Document processing did not complete successfully "
-                            f"for {url}, doc_status={getattr(updated_doc, 'status', 'N/A') if updated_doc else 'not_found'}"
+                            "[URL Refetch] Document processing did not complete successfully "
+                            "for %s, doc_status=%s",
+                            url_log_reference(url),
+                            getattr(updated_doc, "status", "N/A") if updated_doc else "not_found",
                         )
                     await session.commit()
 
-                    logger.info(f"[URL Refetch] Indexed URL {url} with doc {doc.id}")
+                    logger.info(
+                        "[URL Refetch] Indexed URL %s with doc %s",
+                        url_log_reference(url), doc.id,
+                    )
 
                 except Exception as e:
-                    logger.exception(f"[URL Refetch] Error processing {url}: {e}")
+                    logger.error(
+                        "[URL Refetch] Error processing %s: %s",
+                        url_log_reference(url), type(e).__name__,
+                    )
                     url_source.status = "failed"
                     url_source.last_error = str(e)[:500]
                     url_source.is_indexed = False
@@ -310,7 +325,9 @@ async def process_url_refetch(
         logger.info(f"[URL Refetch] Job {job_id} was cancelled by asyncio")
         raise
     except Exception as e:
-        logger.exception(f"[URL Refetch] Job {job_id} failed: {e}")
+        logger.error(
+            "[URL Refetch] Job %s failed: %s", job_id, type(e).__name__
+        )
     finally:
         if release_lock:
             await task_lock.release_task(agent_id, job_id)
@@ -375,7 +392,8 @@ async def process_site_crawl(
     from services.url_safety import validate_url_safe
 
     logger.info(
-        f"[Site Crawl] Starting job {job_id} for agent {agent_id}, url={start_url}"
+        "[Site Crawl] Starting job %s for agent %s, %s",
+        job_id, agent_id, url_log_reference(start_url),
     )
 
     try:
@@ -387,7 +405,10 @@ async def process_site_crawl(
         # Validate start URL
         safe, reason = validate_url_safe(start_url)
         if not safe:
-            logger.error(f"[Site Crawl] Unsafe start URL: {start_url} - {reason}")
+            logger.error(
+                "[Site Crawl] Unsafe start URL %s: %s",
+                url_log_reference(start_url), reason,
+            )
             async with AsyncSessionLocal() as session:
                 await _store_crawl_error(
                     session, agent_id, start_url,
@@ -414,7 +435,10 @@ async def process_site_crawl(
             logger.info(f"[Site Crawl] Job {job_id} cancelled after crawling")
             return
 
-        logger.info(f"[Site Crawl] Discovered {len(results)} pages from {start_url}")
+        logger.info(
+            "[Site Crawl] Discovered %s pages from %s",
+            len(results), url_log_reference(start_url),
+        )
 
         # Filter to pages with actual content
         valid_pages = [p for p in results if not p.error and p.url]
@@ -481,8 +505,8 @@ async def process_site_crawl(
             except IntegrityError as e:
                 await session.rollback()
                 logger.warning(
-                    f"[Site Crawl] IntegrityError during commit "
-                    f"(duplicate URLs detected, non-fatal): {e}"
+                    "[Site Crawl] IntegrityError during commit "
+                    "(duplicate URLs detected, non-fatal)"
                 )
                 # Duplicates are skipped — the crawl is still successful
             logger.info(f"[Site Crawl] Created {created_count} URL records")
@@ -506,7 +530,7 @@ async def process_site_crawl(
         logger.info(f"[Site Crawl] Job {job_id} was cancelled by asyncio")
         raise
     except Exception as e:
-        logger.exception(f"[Site Crawl] Job {job_id} failed: {e}")
+        logger.error("[Site Crawl] Job %s failed: %s", job_id, type(e).__name__)
         try:
             async with AsyncSessionLocal() as session:
                 await _store_crawl_error(
@@ -514,8 +538,11 @@ async def process_site_crawl(
                     f"Site crawl failed: {str(e)[:500]}",
                 )
                 await session.commit()
-        except Exception:
-            logger.exception(f"[Site Crawl] Failed to store error for job {job_id}")
+        except Exception as store_error:
+            logger.error(
+                "[Site Crawl] Failed to store error for job %s: %s",
+                job_id, type(store_error).__name__,
+            )
     finally:
         await task_lock.release_task(agent_id, job_id)
 
@@ -533,7 +560,7 @@ async def process_index_rebuild(
         job_id: Task ID for tracking
     """
     from services.task_lock import TaskType, task_lock
-    from services.qdrant_service import QdrantKbService
+    from services.qdrant_service import QdrantKbService, require_delete_outcome
 
     logger.info(f"[Index Rebuild] Starting job {job_id} for agent {agent_id}")
 
@@ -552,7 +579,7 @@ async def process_index_rebuild(
             if force:
                 logger.info(f"[Index Rebuild] Clearing existing index for KB {kb_id}")
                 qdrant = QdrantKbService()
-                await qdrant.delete_collection(kb_id)
+                require_delete_outcome(await qdrant.delete_collection(kb_id))
                 await qdrant.ensure_collection(
                     kb_id, agent.embedding_model or "BAAI/bge-m3"
                 )

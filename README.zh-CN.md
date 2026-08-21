@@ -21,7 +21,7 @@ Basjoo 是一个面向 AI 客服场景的平台，主要由三部分组成：
 - **Redis**：限流、缓存相关能力
 - **Qdrant**：向量检索与文档索引（自研多租户 KB）
 - **Scrapling 微服务**：网页内容抓取（curl_cffi + readability-lxml）
-- **PostgreSQL/pgvector**：Compose 的 dev/prod profile 会启动该服务；当前后端未接入，也未安装 PostgreSQL 驱动
+- **PostgreSQL/pgvector**：只在显式 `experimental-db` profile 下启动；当前后端未接入，也未安装 PostgreSQL 驱动
 - **nginx**：Docker 部署下的反向代理
 
 ## 建议运行环境
@@ -41,8 +41,8 @@ Basjoo 以 Docker 容器方式运行。所有 LLM 推理和 Embedding 调用均�
 对于一台全新的 Ubuntu 或 Debian 服务器，可直接执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/luyan9513/basjoo-rag-saas/main/install-deploy.sh | \
-  sudo env BASJOO_REPO_URL=https://github.com/luyan9513/basjoo-rag-saas BASJOO_BRANCH=main sh
+curl -fsSL https://raw.githubusercontent.com/luyan9513/basjoo-ai-support/main/install-deploy.sh | \
+  sudo env BASJOO_REPO_URL=https://github.com/luyan9513/basjoo-ai-support BASJOO_BRANCH=main sh
 ```
 
 如果你已经在本地检出了仓库，也可以直接运行：
@@ -139,15 +139,15 @@ Widget 提供访客侧聊天入口，支持会话持久化、多语言文案、�
 - SQLAlchemy async + SQLite
 - Redis（限流、缓存）
 - Qdrant 客户端/API（dense 向量检索、文档索引和 Tenant/KB payload 过滤）
-- PostgreSQL/pgvector Compose 服务（dev/prod profile 会启动，但当前后端未使用）
+- PostgreSQL/pgvector Compose 服务（仅 `experimental-db` profile；当前后端未使用）
 - Scrapling 微服务（curl_cffi + readability-lxml 网页内容提取）
 - APScheduler
 - OpenAI 兼容接口、Anthropic、Google Gemini 等服务商 SDK
 
 ### 前端
 
-- Next.js 14
-- React 18
+- Next.js 15.5.21
+- React 19.2.8
 - TypeScript
 - i18next
 
@@ -186,7 +186,7 @@ bash scripts/prod_stability_check.sh
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:8000`
 - Qdrant: `http://localhost:6333`
-- PostgreSQL Compose 服务：`127.0.0.1:5432`（dev/prod profile 会启动；当前后端未使用）
+- PostgreSQL Compose 服务：`127.0.0.1:5432`（仅 `experimental-db` profile；当前后端未使用）
 - Redis: `127.0.0.1:6379`
 
 开发环境前端和后端端口以 `3000:3000`、`8000:8000` 方式绑定，因此同一网络中可访问宿主机的其它设备也可以访问。
@@ -207,13 +207,14 @@ python3 main.py
 
 ```bash
 curl http://localhost:8000/health
+curl http://localhost:8000/ready
 ```
 
 #### 前端
 
 ```bash
 cd frontend-nextjs
-npm install
+npm ci
 npm run dev
 ```
 
@@ -221,7 +222,7 @@ npm run dev
 
 ```bash
 cd widget
-npm install
+npm ci
 npm run dev
 ```
 
@@ -230,7 +231,7 @@ npm run dev
 ### 前端（`frontend-nextjs/`）
 
 ```bash
-npm install
+npm ci
 npm run dev
 npm run build
 npm run start        # 本地运行生产构建
@@ -242,7 +243,7 @@ npm run test         # vitest
 ### Widget（`widget/`）
 
 ```bash
-npm install
+npm ci
 npm run dev          # 开发打包 + 示例服务
 npm run build        # 完整构建（类型检查 + 开发 + 生产打包）
 npm run build:dev    # 未压缩 ESM 打包 (dist/basjoo-widget.js)
@@ -452,17 +453,17 @@ pytest -q \
 ## 部署说明
 
 - `docker-compose.yml` 是当前的主要编排入口。
-- `install-deploy.sh` 是面向 Ubuntu/Debian 的一键生产部署脚本。可自动安装 Docker/Compose、clone 仓库、强制同步远端分支，并在部署前完成 `.env` 初始化。
-- nginx 当前配置 `client_max_body_size 12m`。这足以让略高于后端默认 10 MiB 上限的请求进入 FastAPI 并取得 JSON 413，但也会让经过 nginx 的文件上传低于后端单文件 20 MiB 的上限。
+- `install-deploy.sh` 是面向 Ubuntu/Debian 的一键生产部署脚本，可自动安装 Docker/Compose、clone 或更新仓库。破坏性 reset/clean 和 swap 修改默认关闭，只有显式设置对应环境变量才会执行。
+- nginx 与后端上传路径统一允许最大 105 MiB 请求体；普通非上传请求仍限制为 10 MiB。应用会统计实际流式字节，不只信任 `Content-Length`。
 - 只有当 `./ssl` 中存在可读证书和私钥时，才会启用可选 HTTPS。
 - 当证书存在时，nginx 会在 443 提供 HTTPS，并将 80 上的 HTTP 请求自动重定向到 HTTPS。
-- 可以为 nginx 设置 `SERVER_DOMAIN` 作为规范域名。设置后，nginx 只响应该域名；直接 IP 访问或其他 Host 请求会被 nginx 以 444 丢弃，同时保留 `/health` 供负载均衡探活使用。
+- 可以为 nginx 设置 `SERVER_DOMAIN` 作为规范域名。设置后，nginx 只响应该域名；直接 IP 访问或其他 Host 请求会被 nginx 以 444 丢弃，同时保留 `/health` 做存活探针；依赖就绪检查应使用 `/ready`。
 - 如果未设置 `SERVER_DOMAIN`，nginx 会保持当前按请求 Host 正常响应的行为。
 - 如果后端存在绕过标准中间件链的提前返回，也应补齐 CORS 头，避免嵌入式 widget 出现跨域失败。
 - 后端会将默认 widget agent ID 持久化到 `/app/data/.agent_id`。只要保留 backend 数据卷，重新部署后旧的 widget 嵌入代码仍然可用。
 - 如果你知道历史上已上线 widget 的旧 `agentId`，可在新部署首次启动前设置 `DEFAULT_AGENT_ID=agt_xxxxxxxxxxxx`，以保持旧嵌入代码兼容。
 - 除非你明确想重置 widget 身份，否则不要执行 `docker compose down -v`，也不要删除 backend 数据卷。
-- 一键部署脚本只会强制重置仓库代码文件，不会删除 Docker 命名卷，因此 `/app/data` 中的持久化数据在重新部署后依然保留。
+- 一键部署脚本会保留 Docker 命名卷。破坏性仓库 reset/clean 需要显式开启，使用前应先人工审阅。
 
 ### 重新部署时保留旧 widget 的推荐流程
 

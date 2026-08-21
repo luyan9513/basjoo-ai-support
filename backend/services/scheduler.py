@@ -20,6 +20,7 @@ from models import (
     WorkspaceQuota,
 )
 from services.crawler import SiteCrawler
+from services.url_safety import url_log_reference
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ class URLFetchScheduler:
                     await self.fetch_agent_urls(db, agent)
 
         except Exception as e:
-            logger.exception(f"Error in check_and_fetch_urls: {e}")
+            logger.error("Error in check_and_fetch_urls: %s", type(e).__name__)
 
     async def fetch_agent_urls(self, db: AsyncSession, agent: Agent):
         """抓取特定Agent的URL，读取列表后不再持有会话执行 HTTP 请求"""
@@ -124,7 +125,10 @@ class URLFetchScheduler:
                 await self.fetch_single_url(crawler, url_source.id, str(agent.id))
 
         except Exception as e:
-            logger.exception(f"Error in fetch_agent_urls for agent {agent.id}: {e}")
+            logger.error(
+                "Error in fetch_agent_urls for agent %s: %s",
+                agent.id, type(e).__name__,
+            )
 
     async def fetch_single_url(
         self,
@@ -141,7 +145,10 @@ class URLFetchScheduler:
                 url_source = result.scalar_one_or_none()
                 if not url_source:
                     return
-                logger.info(f"Refetching URL {url_source.url} (ID: {url_source.id})")
+                logger.info(
+                    "Refetching URL %s (ID: %s)",
+                    url_log_reference(url_source.url), url_source.id,
+                )
                 url = url_source.url
                 old_hash = url_source.content_hash
                 url_source.status = "fetching"
@@ -167,33 +174,39 @@ class URLFetchScheduler:
                         url_source.last_fetch_at = datetime.now(timezone.utc)
                         url_source.fetch_metadata = page_result.metadata
                         logger.info(
-                            f"URL {url_source.url} content changed, updated. "
-                            f"Old hash: {old_hash[:8] if old_hash else 'None'}..., New hash: {new_hash[:8]}..."
+                            "URL %s content changed, updated. Old hash: %s..., New hash: %s...",
+                            url_log_reference(url_source.url),
+                            old_hash[:8] if old_hash else "None",
+                            new_hash[:8],
                         )
                     else:
                         url_source.status = "success"
                         url_source.last_fetch_at = datetime.now(timezone.utc)
                         logger.info(
-                            f"URL {url_source.url} content unchanged, only updated timestamp"
+                            "URL %s content unchanged, only updated timestamp",
+                            url_log_reference(url_source.url),
                         )
 
                     await db.commit()
 
                     if old_hash != new_hash:
                         logger.info(
-                            f"URL content changed for {url_source.url} (self-KB handles indexing)"
+                            "URL content changed for %s (self-KB handles indexing)",
+                            url_log_reference(url_source.url),
                         )
                 else:
                     url_source.status = "failed"
                     url_source.last_error = page_result.error or "Unknown error"
                     await db.commit()
                     logger.error(
-                        f"Failed to refetch URL {url_source.url}: {page_result.error}"
+                        "Failed to refetch URL %s",
+                        url_log_reference(url_source.url),
                     )
 
         except Exception as e:
-            logger.exception(
-                f"Error in fetch_single_url for URL ID {url_source_id}: {e}"
+            logger.error(
+                "Error in fetch_single_url for URL ID %s: %s",
+                url_source_id, type(e).__name__,
             )
             try:
                 async with AsyncSessionLocal() as db:

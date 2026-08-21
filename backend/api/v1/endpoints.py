@@ -103,6 +103,11 @@ from services.file_service import (
 from core.encryption import encrypt_api_key, decrypt_api_key
 from services.llm_service import get_llm_service
 from services.auth_service import AuthService
+from services.visitor_token_service import (
+    VisitorTokenError,
+    create_visitor_token,
+    decode_visitor_token,
+)
 from services.kb_retrieval_service import KbRetrievalService
 from services.kb_service import KbService
 from middleware import get_request_client_ip
@@ -707,17 +712,31 @@ async def get_or_create_chat_session(
     request: ChatRequest,
     http_request: Request,
     db: AsyncSession,
+    admin_user: AdminUser | None = None,
 ) -> ChatSession:
     """Resolve the current active session or create a new one."""
     agent_id = agent.id
     session = None
+    visitor_claims = None
     if request.session_id:
+        if not admin_user:
+            visitor_claims = require_visitor_token(
+                http_request,
+                agent_id=agent_id,
+                session_id=request.session_id,
+                visitor_id=request.visitor_id,
+            )
         result = await db.execute(
             select(ChatSession)
             .where(
                 ChatSession.agent_id == agent_id,
                 ChatSession.session_id == request.session_id,
                 ChatSession.status != "closed",
+                *(
+                    [ChatSession.visitor_id == visitor_claims.visitor_id]
+                    if visitor_claims
+                    else []
+                ),
             )
             .order_by(ChatSession.created_at.desc(), ChatSession.id.desc())
         )
@@ -725,6 +744,9 @@ async def get_or_create_chat_session(
 
     if session:
         return session
+
+    if request.session_id and not admin_user:
+        raise HTTPException(status_code=404, detail="Session not found")
 
     client_ip = get_request_client_ip(http_request)
     user_agent = http_request.headers.get("User-Agent", "")
@@ -749,14 +771,13 @@ async def get_or_create_chat_session(
         }
         country = timezone_country_map.get(request.timezone)
 
-    requested_session_id = (
-        request.session_id or f"sess_{agent_id}_{uuid.uuid4().hex[:12]}"
-    )
+    requested_session_id = request.session_id or f"sess_{agent_id}_{uuid.uuid4().hex[:12]}"
+    visitor_id = request.visitor_id or f"visitor_{uuid.uuid4().hex}"
     session = ChatSession(
         agent_id=agent_id,
         session_id=requested_session_id,
         locale=request.locale,
-        visitor_id=request.visitor_id,
+        visitor_id=visitor_id,
         visitor_ip=client_ip,
         visitor_user_agent=user_agent[:500] if user_agent else None,
         visitor_country=country,
@@ -781,6 +802,45 @@ async def get_or_create_chat_session(
             raise
 
     return session
+
+
+def get_bearer_token(request: Request) -> str | None:
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        return None
+    token = authorization.removeprefix("Bearer ").strip()
+    return token or None
+
+
+def require_visitor_token(
+    request: Request,
+    *,
+    agent_id: str,
+    session_id: str,
+    visitor_id: str | None = None,
+):
+    token = get_bearer_token(request)
+    try:
+        claims = decode_visitor_token(token or "")
+    except VisitorTokenError:
+        raise HTTPException(status_code=404, detail="Session not found") from None
+
+    if claims.agent_id != agent_id or claims.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if visitor_id and claims.visitor_id != visitor_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return claims
+
+
+def create_session_visitor_token(session: ChatSession) -> str:
+    visitor_id = str(session.visitor_id or "")
+    if not visitor_id:
+        raise RuntimeError("Public chat session is missing visitor identity")
+    return create_visitor_token(
+        agent_id=str(session.agent_id),
+        session_id=str(session.session_id),
+        visitor_id=visitor_id,
+    )
 
 
 async def prepare_chat_request(
@@ -836,12 +896,18 @@ async def prepare_chat_request(
     if use_mock_llm:
         logger.info("Agent未配置API Key，使用Mock LLM服务（仅用于测试/演示）")
 
-    session = await get_or_create_chat_session(agent, request, http_request, db)
+    session = await get_or_create_chat_session(
+        agent, request, http_request, db, admin_user=admin_user
+    )
+    visitor_token = (
+        create_session_visitor_token(session) if session.visitor_id else None
+    )
 
     if session.status in {"handoff_requested", "taken_over"}:
         return {
             "mode": session.status,
             "session": session,
+            "visitor_token": visitor_token,
             "workspace_id": agent_workspace_id,
             "quota_id": quota.id,
         }
@@ -880,6 +946,7 @@ async def prepare_chat_request(
                 "mode": "rate_limited",
                 "reply": limit_reply,
                 "session": session,
+                "visitor_token": visitor_token,
             }
 
     history_result = await db.execute(
@@ -996,6 +1063,7 @@ async def prepare_chat_request(
             "reply": fallback_reply,
             "agent": agent,
             "session": session,
+            "visitor_token": visitor_token,
             "workspace_id": agent_workspace_id,
             "quota_id": quota.id,
             "sources": [],
@@ -1030,6 +1098,7 @@ async def prepare_chat_request(
         "mode": "llm",
         "agent": agent,
         "session": session,
+        "visitor_token": visitor_token,
         "workspace_id": agent.workspace_id,
         "quota_id": quota.id,
         "use_mock_llm": use_mock_llm,
@@ -1208,6 +1277,7 @@ async def chat(
     async with database.AsyncSessionLocal() as prep_db:
         chat_context = await prepare_chat_request(request, http_request, prep_db)
         session = chat_context["session"]
+        visitor_token = chat_context.get("visitor_token")
 
         if chat_context["mode"] == "rate_limited":
             return ChatResponse(
@@ -1215,6 +1285,7 @@ async def chat(
                 sources=[],
                 usage=None,
                 session_id=session.session_id,
+                visitor_token=visitor_token,
             )
 
         if chat_context["mode"] in {"handoff_requested", "taken_over"}:
@@ -1225,6 +1296,7 @@ async def chat(
                 sources=[],
                 usage=None,
                 session_id=session.session_id,
+                visitor_token=visitor_token,
                 taken_over=chat_context["mode"] == "taken_over",
                 handoff_requested=chat_context["mode"] == "handoff_requested",
             )
@@ -1248,6 +1320,7 @@ async def chat(
                 sources=sources,
                 usage=None,
                 session_id=session.session_id,
+                visitor_token=visitor_token,
                 message_id=assistant_message.id,
             )
 
@@ -1288,11 +1361,15 @@ async def chat(
             sources=sources,
             usage=None,
             session_id=session_public_id,
+            visitor_token=visitor_token,
         )
 
     reply = replace_source_placeholders("".join(reply_parts), sources)
     if not reply or not reply.strip():
-        logger.warning("LLM returned empty response for session %s", session_public_id)
+        logger.warning(
+            "LLM returned empty response for session_hash=%s",
+            hash_log_identifier(session_public_id),
+        )
         reply = get_restricted_reply(
             _restricted_reply, "抱歉，我暂时无法回答这个问题，请换个方式提问。"
         )
@@ -1335,6 +1412,7 @@ async def chat(
         sources=sources,
         usage=usage,
         session_id=session_public_id,
+        visitor_token=visitor_token,
         message_id=assistant_message.id,
     )
 
@@ -1359,6 +1437,7 @@ async def chat_stream(
                     request, http_request, prep_db
                 )
                 session = chat_context["session"]
+                visitor_token = chat_context.get("visitor_token")
 
                 if chat_context["mode"] == "rate_limited":
                     yield sse_event("sources", {"sources": []})
@@ -1368,6 +1447,7 @@ async def chat_stream(
                         {
                             "message_id": None,
                             "session_id": session.session_id,
+                            "visitor_token": visitor_token,
                             "usage": None,
                             "taken_over": False,
                         },
@@ -1383,6 +1463,7 @@ async def chat_stream(
                         {
                             "message_id": None,
                             "session_id": session.session_id,
+                            "visitor_token": visitor_token,
                             "usage": None,
                             "taken_over": chat_context["mode"] == "taken_over",
                             "handoff_requested": chat_context["mode"]
@@ -1415,6 +1496,7 @@ async def chat_stream(
                         {
                             "message_id": assistant_message.id,
                             "session_id": session.session_id,
+                            "visitor_token": visitor_token,
                             "usage": None,
                             "taken_over": False,
                         },
@@ -1438,9 +1520,9 @@ async def chat_stream(
                 _restricted_reply = _agent.restricted_reply
 
                 logger.info(
-                    "chat_stream prepare done agent_id=%s session_id=%s prepare_ms=%.1f",
+                    "chat_stream prepare done agent_id=%s session_hash=%s prepare_ms=%.1f",
                     request.agent_id,
-                    session_public_id,
+                    hash_log_identifier(session_public_id),
                     (time.monotonic() - request_start) * 1000,
                 )
 
@@ -1475,9 +1557,9 @@ async def chat_stream(
                 max_tokens=max_tokens,
             ).__aiter__()
             logger.info(
-                "chat_stream stream created agent_id=%s session_id=%s stream_create_ms=%.1f",
+                "chat_stream stream created agent_id=%s session_hash=%s stream_create_ms=%.1f",
                 request.agent_id,
-                session_public_id,
+                hash_log_identifier(session_public_id),
                 (time.monotonic() - stream_create_start) * 1000,
             )
 
@@ -1494,6 +1576,7 @@ async def chat_stream(
                         {
                             "message_id": None,
                             "session_id": session_public_id,
+                            "visitor_token": visitor_token,
                             "usage": None,
                             "taken_over": False,
                         },
@@ -1520,9 +1603,9 @@ async def chat_stream(
                     if not first_token_logged:
                         first_token_logged = True
                         logger.info(
-                            "chat_stream first token agent_id=%s session_id=%s first_token_ms=%.1f total_before_first_ms=%.1f",
+                            "chat_stream first token agent_id=%s session_hash=%s first_token_ms=%.1f total_before_first_ms=%.1f",
                             request.agent_id,
-                            session_public_id,
+                            hash_log_identifier(session_public_id),
                             (time.monotonic() - stream_start) * 1000,
                             (time.monotonic() - request_start) * 1000,
                         )
@@ -1542,6 +1625,7 @@ async def chat_stream(
                 {
                     "message_id": None,
                     "session_id": session_public_id,
+                    "visitor_token": visitor_token,
                     "usage": None,
                     "taken_over": False,
                 },
@@ -1551,7 +1635,8 @@ async def chat_stream(
         reply = replace_source_placeholders("".join(reply_parts), sources)
         if not reply or not reply.strip():
             logger.warning(
-                "LLM returned empty stream response for session %s", session_public_id
+                "LLM returned empty stream response for session_hash=%s",
+                hash_log_identifier(session_public_id),
             )
             reply = get_restricted_reply(
                 _restricted_reply, "抱歉，我暂时无法回答这个问题，请换个方式提问。"
@@ -1601,6 +1686,7 @@ async def chat_stream(
                     {
                         "message_id": assistant_message.id,
                         "session_id": session_public_id,
+                        "visitor_token": visitor_token,
                         "usage": usage,
                         "taken_over": False,
                     },
@@ -1645,7 +1731,13 @@ async def request_human_handoff(
     session = await resolve_public_chat_session(db, handoff.session_id)
     if not session or session.agent_id != handoff.agent_id:
         raise HTTPException(status_code=404, detail="Session not found")
-    if session.visitor_id and handoff.visitor_id != session.visitor_id:
+    visitor_claims = require_visitor_token(
+        http_request,
+        agent_id=str(session.agent_id),
+        session_id=str(session.session_id),
+        visitor_id=handoff.visitor_id,
+    )
+    if not session.visitor_id or visitor_claims.visitor_id != session.visitor_id:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.status == "closed":
         raise HTTPException(status_code=409, detail="Session is closed")
@@ -1716,6 +1808,14 @@ async def get_chat_messages(
     session = await resolve_public_chat_session(db, session_id)
 
     if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    visitor_claims = require_visitor_token(
+        request,
+        agent_id=str(session.agent_id),
+        session_id=str(session.session_id),
+    )
+    if not session.visitor_id or visitor_claims.visitor_id != session.visitor_id:
         raise HTTPException(status_code=404, detail="Session not found")
 
     # 已关闭的会话返回空数组，SDK 收到空数组会清除 sessionId 并开启新会话
@@ -3360,12 +3460,38 @@ async def delete_url(
     current_user: AdminUser = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    await require_agent_admin(db, agent_id, current_user)
+    agent = await require_agent_admin(db, agent_id, current_user)
     us = await db.get(URLSource, url_id)
     if not us or us.agent_id != agent_id:
         raise HTTPException(status_code=404, detail="URL not found")
+
+    if agent.kb_id:
+        kb_result = await db.execute(
+            select(KnowledgeBase).where(KnowledgeBase.id == agent.kb_id)
+        )
+        kb = kb_result.scalar_one_or_none()
+        if kb:
+            docs_result = await db.execute(
+                select(KbDocument).where(
+                    KbDocument.kb_id == agent.kb_id,
+                    KbDocument.tenant_id == kb.tenant_id,
+                    KbDocument.filename == f"url_{url_id}.txt",
+                )
+            )
+            from services.kb_document_processor import KbDocumentProcessor
+
+            processor = KbDocumentProcessor()
+            for doc in docs_result.scalars().all():
+                await processor.delete_document(
+                    kb.tenant_id, agent.kb_id, str(doc.id), db
+                )
+
     await db.delete(us)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     return {"success": True}
 
 
@@ -3388,10 +3514,8 @@ async def clear_all_urls(
 
     from sqlalchemy import func, select
     from models import KbDocument, KbChunk
-    from services.qdrant_service import QdrantKbService
-    from services.kb_document_processor import UPLOAD_ROOT
+    from services.qdrant_service import QdrantKbService, require_delete_outcome
     import os
-    import shutil
 
     # Get agent's KB
     agent = await db.execute(select(Agent).where(Agent.id == agent_id))
@@ -3412,31 +3536,37 @@ async def clear_all_urls(
     deleted_chunk_count = 0
     deleted_qdrant_count = 0
     deleted_files_count = 0
+    storage_paths: list[str] = []
 
     if kb_id:
+        kb_query = select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
+        kb_result = await db.execute(kb_query)
+        kb = kb_result.scalar_one_or_none()
+        tenant_id = kb.tenant_id if kb else None
+
         # Get URL-generated documents
         doc_query = select(KbDocument).where(
             KbDocument.kb_id == kb_id,
+            KbDocument.tenant_id == tenant_id,
             KbDocument.filename.like('url_%')
         )
         docs_result = await db.execute(doc_query)
         url_docs = list(docs_result.scalars().all())
 
         if url_docs:
-            # Get tenant_id for Qdrant deletion
-            kb_query = select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
-            kb_result = await db.execute(kb_query)
-            kb = kb_result.scalar_one_or_none()
-            tenant_id = kb.tenant_id if kb else None
-
-            # Delete from Qdrant
+            # Delete all vector targets first. Any service failure aborts before
+            # SQLite records or stored files are touched.
             qdrant = QdrantKbService()
             for doc in url_docs:
-                try:
+                outcome = require_delete_outcome(
                     await qdrant.delete_points_by_doc_id(kb_id, str(doc.id))
+                )
+                if outcome == "deleted":
                     deleted_qdrant_count += 1
-                except Exception as e:
-                    logger.warning(f"Failed to delete Qdrant points for doc {doc.id}: {e}")
+
+            storage_paths = [
+                str(getattr(doc, "storage_path", "") or "") for doc in url_docs
+            ]
 
             # Delete KbChunks
             for doc in url_docs:
@@ -3447,19 +3577,6 @@ async def clear_all_urls(
                 chunk_result = await db.execute(chunk_delete)
                 deleted_chunk_count += chunk_result.rowcount or 0
 
-            # Delete stored files
-            for doc in url_docs:
-                storage_path = getattr(doc, 'storage_path', None)
-                if storage_path and os.path.exists(storage_path):
-                    try:
-                        # Delete the entire doc directory
-                        doc_dir = os.path.dirname(storage_path)
-                        if os.path.exists(doc_dir):
-                            shutil.rmtree(doc_dir)
-                            deleted_files_count += 1
-                    except Exception as e:
-                        logger.warning(f"Failed to delete file for doc {doc.id}: {e}")
-
             # Delete KbDocuments
             doc_ids = [doc.id for doc in url_docs]
             doc_delete = delete(KbDocument).where(KbDocument.id.in_(doc_ids))
@@ -3468,11 +3585,21 @@ async def clear_all_urls(
 
     # Delete all URLs for this agent
     await db.execute(delete(URLSource).where(URLSource.agent_id == agent_id))
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    for storage_path in storage_paths:
+        if storage_path and os.path.exists(storage_path):
+            os.remove(storage_path)
+            deleted_files_count += 1
 
     return {
         "success": True,
         "message": "All URLs and associated KB data cleared successfully",
+        "deleted_count": deleted_url_count,
         "deleted_url_count": deleted_url_count,
         "deleted_doc_count": deleted_doc_count,
         "deleted_chunk_count": deleted_chunk_count,
@@ -3751,16 +3878,16 @@ async def clear_all_files(
 
     # Get all document IDs
     result = await db.execute(
-        select(KbDocument.id).where(KbDocument.kb_id == agent.kb_id)
+        select(KbDocument.id).where(
+            KbDocument.kb_id == agent.kb_id,
+            ~KbDocument.filename.like("url_%"),
+        )
     )
     doc_ids = [row[0] for row in result.all()]
 
     # Delete each document using processor (clears Qdrant + DB + files)
     for doc_id in doc_ids:
-        try:
-            await processor.delete_document(kb.tenant_id, agent.kb_id, doc_id, db)
-        except Exception as e:
-            logger.warning(f"Failed to delete document {doc_id}: {e}")
+        await processor.delete_document(kb.tenant_id, agent.kb_id, doc_id, db)
 
     return {
         "success": True,

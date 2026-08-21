@@ -202,6 +202,7 @@ def test_env_bootstrap_creates_missing_env_file(tmp_path):
     env_text = env_path.read_text(encoding="utf-8")
 
     assert env_path.exists()
+    assert env_path.stat().st_mode & 0o777 == 0o600
     assert "ALLOWED_ORIGINS=*" in env_text
     assert "SECRET_KEY=" in env_text
     assert "ENCRYPTION_KEY=" in env_text

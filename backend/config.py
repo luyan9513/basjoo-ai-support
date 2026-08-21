@@ -147,6 +147,7 @@ class Settings(BaseSettings):
     create_default_agent_on_bootstrap: bool = False
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
+    visitor_token_expire_minutes: int = 43200
 
     # LLM / Embedding reliability
     llm_test_timeout_seconds: int = 10

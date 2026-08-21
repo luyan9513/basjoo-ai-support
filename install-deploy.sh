@@ -1,9 +1,10 @@
 #!/bin/sh
 set -eu
 
-BASJOO_REPO_URL=${BASJOO_REPO_URL:-https://github.com/haoyiyin/basjoo}
+BASJOO_REPO_URL=${BASJOO_REPO_URL:-https://github.com/luyan9513/basjoo-ai-support.git}
 BASJOO_BRANCH=${BASJOO_BRANCH:-main}
-BASJOO_FORCE_CLEAN=${BASJOO_FORCE_CLEAN:-1}
+BASJOO_DESTRUCTIVE_UPDATE=${BASJOO_DESTRUCTIVE_UPDATE:-0}
+BASJOO_CLEAN_UNTRACKED=${BASJOO_CLEAN_UNTRACKED:-0}
 INSTALL_DOCKER_URL=${INSTALL_DOCKER_URL:-https://get.docker.com}
 
 have_cmd() {
@@ -191,12 +192,26 @@ sync_repo() {
 			git -C "$BASJOO_DIR" remote add origin "$BASJOO_REPO_URL"
 		fi
 		git -C "$BASJOO_DIR" fetch --prune origin "$BASJOO_BRANCH"
-		git -C "$BASJOO_DIR" reset --hard
-		git -C "$BASJOO_DIR" checkout -B "$BASJOO_BRANCH" FETCH_HEAD
-		if [ "$BASJOO_FORCE_CLEAN" = "1" ] || [ "$BASJOO_FORCE_CLEAN" = "true" ] || [ "$BASJOO_FORCE_CLEAN" = "yes" ]; then
-			git -C "$BASJOO_DIR" clean -fd
+		if [ "$BASJOO_DESTRUCTIVE_UPDATE" = "1" ] || [ "$BASJOO_DESTRUCTIVE_UPDATE" = "true" ] || [ "$BASJOO_DESTRUCTIVE_UPDATE" = "yes" ]; then
+			log "Destructive repository update explicitly enabled"
+			git -C "$BASJOO_DIR" checkout -B "$BASJOO_BRANCH" FETCH_HEAD
+			git -C "$BASJOO_DIR" reset --hard FETCH_HEAD
+			if [ "$BASJOO_CLEAN_UNTRACKED" = "1" ] || [ "$BASJOO_CLEAN_UNTRACKED" = "true" ] || [ "$BASJOO_CLEAN_UNTRACKED" = "yes" ]; then
+				git -C "$BASJOO_DIR" clean -fd
+			fi
+			return 0
 		fi
-		git -C "$BASJOO_DIR" reset --hard FETCH_HEAD
+
+		if [ -n "$(git -C "$BASJOO_DIR" status --porcelain)" ]; then
+			fail "Repository has local changes. Commit or move them first, or explicitly set BASJOO_DESTRUCTIVE_UPDATE=1. Untracked cleanup additionally requires BASJOO_CLEAN_UNTRACKED=1."
+		fi
+
+		current_branch=$(git -C "$BASJOO_DIR" symbolic-ref --quiet --short HEAD || true)
+		if [ "$current_branch" != "$BASJOO_BRANCH" ]; then
+			fail "Repository is on branch '$current_branch', expected '$BASJOO_BRANCH'. Switch branches manually or explicitly enable destructive update."
+		fi
+
+		git -C "$BASJOO_DIR" merge --ff-only FETCH_HEAD
 		return 0
 	fi
 
@@ -287,10 +302,6 @@ verify_deployment() {
 	wait_for_container basjoo-redis healthy 120 || {
 		show_failure_logs
 		fail "Redis did not become healthy in time."
-	}
-	wait_for_container basjoo-postgres healthy 120 || {
-		show_failure_logs
-		fail "PostgreSQL did not become healthy in time."
 	}
 	wait_for_container basjoo-qdrant healthy 120 || {
 		show_failure_logs

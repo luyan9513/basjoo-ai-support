@@ -2,6 +2,57 @@
 
 import pytest
 
+from api.endpoints import auth as auth_endpoints
+
+
+@pytest.fixture(autouse=True)
+def clear_login_fallback_history():
+    auth_endpoints._login_attempt_history.clear()
+    yield
+    auth_endpoints._login_attempt_history.clear()
+
+
+def test_login_memory_fallback_records_first_attempt(monkeypatch):
+    monkeypatch.setattr(auth_endpoints.time, "time", lambda: 100.0)
+
+    allowed, retry_after = auth_endpoints._check_login_rate_limit(
+        "198.51.100.10", max_attempts=3, window_seconds=60
+    )
+
+    assert allowed is True
+    assert retry_after == 0
+    assert list(auth_endpoints._login_attempt_history["198.51.100.10"]) == [100.0]
+
+
+def test_login_memory_fallback_blocks_at_limit_and_isolates_ips(monkeypatch):
+    monkeypatch.setattr(auth_endpoints.time, "time", lambda: 200.0)
+
+    assert auth_endpoints._check_login_rate_limit("198.51.100.10", 2, 60)[0]
+    assert auth_endpoints._check_login_rate_limit("198.51.100.10", 2, 60)[0]
+
+    allowed, retry_after = auth_endpoints._check_login_rate_limit(
+        "198.51.100.10", 2, 60
+    )
+    assert allowed is False
+    assert retry_after == 61
+    assert auth_endpoints._check_login_rate_limit("198.51.100.11", 2, 60)[0]
+
+
+def test_login_memory_fallback_allows_after_window_expires(monkeypatch):
+    now = 300.0
+    monkeypatch.setattr(auth_endpoints.time, "time", lambda: now)
+
+    assert auth_endpoints._check_login_rate_limit("198.51.100.10", 1, 60)[0]
+    assert not auth_endpoints._check_login_rate_limit("198.51.100.10", 1, 60)[0]
+
+    now = 361.0
+    allowed, retry_after = auth_endpoints._check_login_rate_limit(
+        "198.51.100.10", 1, 60
+    )
+    assert allowed is True
+    assert retry_after == 0
+    assert list(auth_endpoints._login_attempt_history["198.51.100.10"]) == [361.0]
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(

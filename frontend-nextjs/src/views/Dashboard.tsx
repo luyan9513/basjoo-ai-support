@@ -3,7 +3,13 @@
 import { useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import AdminLayout from "../components/AdminLayout";
-import { useState, useEffect, useRef, useCallback } from "react";
+import {
+	type ReactElement,
+	useState,
+	useEffect,
+	useRef,
+	useCallback,
+} from "react";
 import { api } from "../services/api";
 import { useTranslation } from "react-i18next";
 import { useIsMobile } from "../hooks/useMediaQuery";
@@ -12,7 +18,7 @@ interface QuickAction {
 	titleKey: string;
 	descriptionKey: string;
 	path: string;
-	icon: JSX.Element;
+	icon: ReactElement;
 	gradient: string;
 	glowColor: string;
 }
@@ -210,11 +216,7 @@ export default function Dashboard() {
 	const [agentName, setAgentName] = useState<string>("");
 	const [agentIdCopied, setAgentIdCopied] = useState(false);
 
-	useEffect(() => {
-		loadData();
-	}, []);
-
-	const loadData = async () => {
+	const loadData = useCallback(async () => {
 		try {
 			if (!routeAgentId) {
 				navigate("/");
@@ -233,7 +235,11 @@ export default function Dashboard() {
 			console.error("Failed to load data:", error);
 			navigate("/agents");
 		}
-	};
+	}, [navigate, routeAgentId]);
+
+	useEffect(() => {
+		loadData();
+	}, [loadData]);
 
 	const getGreeting = () => {
 		const hour = new Date().getHours();

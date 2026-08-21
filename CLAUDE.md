@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `backend/` is a FastAPI app with SQLite persistence, Redis-backed rate limiting/cache fallbacks, and self-KB retrieval/indexing (Qdrant).
 - `widget/` builds the embeddable chat widget SDK that talks to the backend streaming chat endpoints.
 - `nginx/` contains the reverse-proxy config used in Docker deployments.
-- `scrapling-service/` is a standalone FastAPI microservice that performs HTTP fetching with `curl_cffi` (TLS-impersonated Chrome 120) and `readability-lxml` content extraction, with `httpx` fallback when `curl_cffi` fails. The backend talks to it via HTTP on port 8001 (internal Docker network).
+- `scrapling-service/` is a standalone FastAPI microservice that performs HTTP fetching with `curl_cffi` (TLS-impersonated Chrome 120) and `readability-lxml` content extraction. It pins the validated public IP with libcurl and fails closed instead of retrying through an unpinned `httpx` fallback. The backend talks to it via HTTP on port 8001 (internal Docker network).
 - `docker-compose.yml` is the primary local/dev/prod orchestration entrypoint.
 
 ## Common commands
@@ -24,14 +24,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### One-command production install (Ubuntu/Debian)
 
-- Blank server deploy: `curl -fsSL https://raw.githubusercontent.com/haoyiyin/basjoo/main/install-deploy.sh | sudo sh`
+- Blank server deploy: `curl -fsSL https://raw.githubusercontent.com/luyan9513/basjoo-ai-support/main/install-deploy.sh | sudo env BASJOO_REPO_URL=https://github.com/luyan9513/basjoo-ai-support BASJOO_BRANCH=main sh`
 - Local repo deploy: `sudo sh install-deploy.sh`
 - Supported systems: Ubuntu and Debian. The script auto-installs Docker/Compose, clones/syncs the repo, and deploys the production profile.
-- Persistent volumes are preserved; `install-deploy.sh` does not remove `backend-data`, `redis-data`, or `postgres-data`.
+- Persistent volumes are preserved; PostgreSQL is only available through the opt-in `experimental-db` profile and is not the application database.
 
 ### Frontend (`frontend-nextjs/`)
 
-- Install deps: `npm install`
+- Install deps: `npm ci`
 - Start dev server: `npm run dev`
 - Build: `npm run build`
 - Start production build locally: `npm run start`
@@ -41,7 +41,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Widget (`widget/`)
 
-- Install deps: `npm install`
+- Install deps: `npm ci`
 - Dev bundle/example server: `npm run dev`
 - Build distributables: `npm run build` (typecheck + dev + prod bundles)
 - Dev-only build: `npm run build:dev` (unminified ESM, `dist/basjoo-widget.js`)
@@ -64,7 +64,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run one test file: `pytest tests/test_api.py`
 - Run one test: `pytest tests/test_api.py::test_name`
 - Test discovery is configured by `backend/pytest.ini` (`tests/`, `test_*.py`, `Test*`, `test_*`)
-- Health check while developing locally: `curl http://localhost:8000/health`
+- Liveness while developing locally: `curl http://localhost:8000/health`; dependency readiness: `curl http://localhost:8000/ready`
 
 ## Architecture
 
@@ -96,7 +96,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **KB scoring**: The self-KB uses Qdrant similarity search. Scores vary by embedding model. The `similarity_threshold` filter defaults to 0.01.
   - Frontend slider: 0-100% maps to 0.00-0.10 internally via `display/1000 = internal`. Default: 10% (0.01).
 - **LLM vs embedding distinction**: `backend/services/llm_service.py` is the *chat-completion* provider abstraction (OpenAI, Google, DeepSeek, etc.). Embeddings are managed by the self-KB via OpenAI-compatible embedding APIs (Jina, SiliconFlow, custom).
-- URL safety/SSRF checks are centralized in `backend/services/url_safety.py` and reused by both schema validation and scraper fetch/discovery flows. SSRF protection blocks loopback, private, link-local, multicast, and unspecified addresses, plus direct IP literals and embedded credentials. The IANA benchmarking range `198.18.0.0/15` (RFC 2544) is explicitly whitelisted because Python's `ipaddress` incorrectly classifies it as `is_private`, but real public websites are hosted there.
+- URL safety/SSRF checks are centralized in `backend/services/url_safety.py` and reused by both schema validation and scraper fetch/discovery flows. SSRF protection blocks loopback, private, link-local, multicast, unspecified and benchmarking addresses, plus direct IP literals and embedded credentials. DNS is resolved and every redirect hop is revalidated; Scrapling pins the validated address for the connection.
 - Task concurrency for fetch/rebuild operations is guarded by the shared task lock service used by the URL and index endpoints.
 
 ### Frontend structure
@@ -114,13 +114,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Deployment notes
 
-- `docker-compose.yml` defines shared Redis/Qdrant/PostgreSQL plus separate dev/prod backend/frontend services.
+- `docker-compose.yml` defines shared Redis/Qdrant plus separate dev/prod backend/frontend services. PostgreSQL is isolated behind the opt-in `experimental-db` profile.
 - `install-deploy.sh` is the one-command production installer for Ubuntu/Debian. It wraps `deploy.sh` and handles Docker/Compose installation, repo clone/sync, and post-deploy health checks.
 - The active frontend container is `frontend-nextjs`; compose and nginx configs route traffic to that app, not the legacy frontend.
-- Nginx should allow bodies larger than the backend guard: `nginx/conf.d/default.conf` sets `client_max_body_size 12m` so oversized requests reach FastAPI and return JSON 413 responses.
+- Nginx and the backend upload path use the same 105 MiB request-body ceiling; ordinary backend requests remain limited to 10 MiB and the ASGI middleware counts actual streamed bytes.
 - Optional HTTPS is enabled by `nginx/docker-entrypoint.sh` only when readable cert/key files exist in `./ssl`; otherwise the stack stays in HTTP-only mode.
 - When HTTPS is enabled, nginx redirects HTTP requests to HTTPS automatically.
-- `SERVER_DOMAIN` can be passed to nginx to enforce a canonical host: matching hostnames are served, direct IP/other-host access is dropped with nginx 444, and `/health` stays available for probes.
+- `SERVER_DOMAIN` can be passed to nginx to enforce a canonical host: matching hostnames are served, direct IP/other-host access is dropped with nginx 444, and `/health` stays available for liveness probes. Use `/ready` for dependency readiness.
 
 ## Testing notes
 
@@ -146,11 +146,11 @@ The backend reads settings from environment variables and `.env` via `pydantic-s
 - `REQUIRE_SECRET_KEY` — set `true` in production to reject insecure secret keys
 - `cors_allow_null_origin` — boolean, default `false`; controls `Origin: null` CORS behavior
 
-Default dev ports: Frontend `3000`, Backend `8000`, Qdrant `6333`, PostgreSQL `5432`, Redis `6379`.
+Default dev ports: Frontend `3000`, Backend `8000`, Qdrant `6333`, Redis `6379`. PostgreSQL `5432` appears only with `experimental-db`.
 
 ## Security model
 
-- **SSRF protection**: `backend/services/url_safety.py` validates all user-provided URLs, blocking loopback, private, link-local, multicast, and unspecified addresses, plus direct IP literals and embedded credentials. The IANA benchmarking range `198.18.0.0/15` is explicitly whitelisted (Python misclassifies it as `is_private`). DNS results are cached (512-entry LRU).
+- **SSRF protection**: `backend/services/url_safety.py` validates all user-provided URLs, blocking loopback, private, link-local, multicast, unspecified and benchmarking addresses, plus direct IP literals and embedded credentials. Fetching pins the validated address and revalidates redirects to reduce DNS-rebinding windows.
 - **Widget origin whitelist**: Public chat routes enforce a per-agent origin whitelist; admin users bypass it for testing.
 - **CORS policy**: Early responses (429, 413) apply CORS through `apply_cors_headers()` in `backend/middleware/rate_limit.py`. `Origin: null` only gets wildcard CORS when `cors_allow_null_origin` is enabled. Missing `Origin` headers get no CORS.
 - **Task concurrency**: Shared `TaskLock` prevents conflicting rebuild/fetch operations on the same agent.

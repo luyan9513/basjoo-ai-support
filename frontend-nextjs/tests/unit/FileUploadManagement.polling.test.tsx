@@ -1,7 +1,7 @@
 // @ts-nocheck
 // @vitest-environment jsdom
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import "@testing-library/jest-dom";
@@ -142,8 +142,9 @@ describe("FileUploadManagement file status polling", () => {
 		const initialCallCount = mockedApi.listFiles.mock.calls.length;
 
 		// Advance timer by 3 seconds (polling interval)
-		vi.advanceTimersByTime(3000);
-		await vi.runOnlyPendingTimersAsync();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(3000);
+		});
 
 		// Should have called listFiles again due to polling
 		await waitFor(() => {
@@ -166,7 +167,9 @@ describe("FileUploadManagement file status polling", () => {
 		});
 
 		// Wait for a few polling cycles with processing files
-		vi.advanceTimersByTime(6000);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(6000);
+		});
 		await waitFor(() => {
 			expect(mockedApi.listFiles.mock.calls.length).toBeGreaterThanOrEqual(2);
 		});
@@ -179,13 +182,15 @@ describe("FileUploadManagement file status polling", () => {
 		const callCountBefore = mockedApi.listFiles.mock.calls.length;
 
 		// Advance time - one more poll should happen to get the ready state
-		vi.advanceTimersByTime(3000);
-		await vi.runAllTimersAsync();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(3000);
+		});
 
 		// After files become ready, polling should stop
 		// Wait a bit more - should NOT trigger many more calls
-		vi.advanceTimersByTime(9000);
-		await vi.runAllTimersAsync();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(9000);
+		});
 
 		// Should have stopped polling (allowing for task status polling which also calls listFiles)
 		const finalCallCount = mockedApi.listFiles.mock.calls.length;
@@ -208,7 +213,9 @@ describe("FileUploadManagement file status polling", () => {
 		const initialCount = mockedApi.listFiles.mock.calls.length;
 
 		// Advance timer to trigger polling
-		vi.advanceTimersByTime(3000);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(3000);
+		});
 
 		// Should call listFiles (via loadFiles)
 		await waitFor(() => {
@@ -239,8 +246,9 @@ describe("FileUploadManagement file status polling", () => {
 		unmount();
 
 		// Advance timer - should NOT trigger many more calls since component unmounted
-		vi.advanceTimersByTime(6000);
-		await vi.runAllTimersAsync();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(6000);
+		});
 
 		// Should have limited additional calls after unmount
 		const finalCallCount = mockedApi.listFiles.mock.calls.length;
@@ -262,7 +270,9 @@ describe("FileUploadManagement file status polling", () => {
 		const initialCount = mockedApi.listFiles.mock.calls.length;
 
 		// Advance timer by 3 seconds
-		vi.advanceTimersByTime(3000);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(3000);
+		});
 
 		// Should poll for pending files too
 		await waitFor(() => {
@@ -287,8 +297,9 @@ describe("FileUploadManagement file status polling", () => {
 		const callCountAfterInitial = mockedApi.listFiles.mock.calls.length;
 
 		// Advance timer
-		vi.advanceTimersByTime(9000);
-		await vi.runAllTimersAsync();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(9000);
+		});
 
 		// Should have limited additional calls - task status polling may still call listFiles
 		// but file-specific polling should not occur

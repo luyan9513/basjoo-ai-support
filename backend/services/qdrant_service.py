@@ -5,6 +5,7 @@ import uuid
 
 from config import settings
 from qdrant_client import AsyncQdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     CollectionInfo,
     Distance,
@@ -16,6 +17,19 @@ from qdrant_client.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+QDRANT_DELETE_DELETED = "deleted"
+QDRANT_DELETE_NOT_FOUND = "not_found"
+
+
+def _is_not_found_error(error: Exception) -> bool:
+    return isinstance(error, UnexpectedResponse) and error.status_code == 404
+
+
+def require_delete_outcome(outcome: str) -> str:
+    if outcome not in {QDRANT_DELETE_DELETED, QDRANT_DELETE_NOT_FOUND}:
+        raise RuntimeError(f"Unexpected Qdrant deletion outcome: {outcome!r}")
+    return outcome
 
 
 def get_embedding_dimension(model: str) -> int:
@@ -94,9 +108,11 @@ class QdrantKbService:
             total += len(batch)
         return total
 
-    async def delete_points_by_doc_id(self, kb_id: str, doc_id: str) -> int:
-        """Delete all points for a doc_id using filter. Returns deleted count (best-effort)."""
+    async def delete_points_by_doc_id(self, kb_id: str, doc_id: str) -> str:
+        """Delete a document's points or report that the collection is already absent."""
         collection_name = get_kb_collection_name(kb_id)
+        if not await self.client.collection_exists(collection_name):
+            return QDRANT_DELETE_NOT_FOUND
         flt = Filter(
             must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
         )
@@ -104,20 +120,28 @@ class QdrantKbService:
             await self.client.delete(
                 collection_name=collection_name,
                 points_selector=flt,
+                wait=True,
             )
-            return 1  # success indicator
-        except Exception as e:
-            logger.warning(f"Qdrant delete failed for doc {doc_id}: {e}")
-            return 0
+        except Exception as error:
+            if _is_not_found_error(error):
+                return QDRANT_DELETE_NOT_FOUND
+            raise
+        return QDRANT_DELETE_DELETED
 
-    async def delete_collection(self, kb_id: str) -> bool:
-        """幂等 delete collection (for KB cascade delete)."""
+    async def delete_collection(self, kb_id: str) -> str:
+        """Delete a KB collection, distinguishing absent targets from failures."""
         collection_name = get_kb_collection_name(kb_id)
+        if not await self.client.collection_exists(collection_name):
+            return QDRANT_DELETE_NOT_FOUND
         try:
-            await self.client.delete_collection(collection_name)
-            return True
-        except Exception:
-            return False
+            deleted = await self.client.delete_collection(collection_name)
+        except Exception as error:
+            if _is_not_found_error(error):
+                return QDRANT_DELETE_NOT_FOUND
+            raise
+        if not deleted:
+            raise RuntimeError("Qdrant did not confirm collection deletion")
+        return QDRANT_DELETE_DELETED
 
     async def search_kb(
         self,

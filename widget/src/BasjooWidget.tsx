@@ -38,6 +38,7 @@ interface ChatMessage {
 interface StreamDoneMeta {
   message_id?: number | null;
   session_id?: string;
+  visitor_token?: string;
   taken_over?: boolean;
   handoff_requested?: boolean;
 }
@@ -157,8 +158,10 @@ export class BasjooWidget {
   private chatWindow: HTMLElement | null = null;
   private messages: ChatMessage[] = [];
   private sessionId: string | null = null;
+  private visitorToken: string | null = null;
   private isOpen = false;
   private readonly STORAGE_KEY: string;
+  private readonly VISITOR_TOKEN_STORAGE_KEY: string;
   private readonly VISITOR_STORAGE_KEY = 'basjoo_visitor_id';
   private visitorId: string;
   private storage: StorageAdapter;
@@ -205,8 +208,10 @@ export class BasjooWidget {
     };
 
     this.STORAGE_KEY = `basjoo_session_${this.config.agentId}`;
+    this.VISITOR_TOKEN_STORAGE_KEY = `basjoo_visitor_token_${this.config.agentId}`;
     this.storage = new StorageAdapter();
     this.sessionId = this.storage.getItem(this.STORAGE_KEY);
+    this.visitorToken = this.storage.getItem(this.VISITOR_TOKEN_STORAGE_KEY);
     this.visitorId = this.storage.getItem(this.VISITOR_STORAGE_KEY) || this.generateVisitorId();
 
     this.effectiveTheme = this.getEffectiveTheme();
@@ -216,6 +221,21 @@ export class BasjooWidget {
     const visitorId = `visitor_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 11)}`;
     this.storage.setItem(this.VISITOR_STORAGE_KEY, visitorId);
     return visitorId;
+  }
+
+  private getVisitorAuthHeaders(): Record<string, string> {
+    return this.visitorToken
+      ? { Authorization: `Bearer ${this.visitorToken}` }
+      : {};
+  }
+
+  private clearStoredSession(): void {
+    this.sessionId = null;
+    this.visitorToken = null;
+    this.storage.removeItem(this.STORAGE_KEY);
+    this.storage.removeItem(this.VISITOR_TOKEN_STORAGE_KEY);
+    this.stopPolling();
+    this.updateHandoffButton();
   }
 
   private detectApiBase(configuredApiBase?: string): string {
@@ -352,9 +372,13 @@ export class BasjooWidget {
     // 页面加载时立即启动标题闪烁提醒，吸引用户打开聊天窗口
     this.startTitleBlink();
 
-    if (this.sessionId) {
+    if (this.sessionId && this.visitorToken) {
       void this.loadHistory();
       return;
+    }
+
+    if (this.sessionId || this.visitorToken) {
+      this.clearStoredSession();
     }
 
     // 欢迎消息
@@ -397,7 +421,8 @@ export class BasjooWidget {
 
     try {
       const response = await fetch(
-        `${this.config.apiBase}/api/v1/chat/messages?session_id=${encodeURIComponent(this.sessionId)}`
+        `${this.config.apiBase}/api/v1/chat/messages?session_id=${encodeURIComponent(this.sessionId)}`,
+        { headers: this.getVisitorAuthHeaders() },
       );
       if (!response.ok) {
         throw new Error('Failed to load history');
@@ -423,8 +448,7 @@ export class BasjooWidget {
       // Fall through to reset invalid or expired sessions.
     }
 
-    this.sessionId = null;
-    this.storage.removeItem(this.STORAGE_KEY);
+    this.clearStoredSession();
     if (this.config.welcomeMessage) {
       this.addMessage({
         role: 'assistant',
@@ -1678,7 +1702,10 @@ export class BasjooWidget {
     try {
       const response = await fetch(`${this.config.apiBase}/api/v1/chat/handoff`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...this.getVisitorAuthHeaders(),
+        },
         body: JSON.stringify({
           agent_id: this.config.agentId,
           session_id: this.sessionId,
@@ -1720,7 +1747,8 @@ export class BasjooWidget {
 
     try {
       const response = await fetch(
-        `${this.config.apiBase}/api/v1/chat/messages?session_id=${encodeURIComponent(this.sessionId)}&after_id=${this.lastMessageId}&role=assistant`
+        `${this.config.apiBase}/api/v1/chat/messages?session_id=${encodeURIComponent(this.sessionId)}&after_id=${this.lastMessageId}&role=assistant`,
+        { headers: this.getVisitorAuthHeaders() },
       );
       if (!response.ok) return;
 
@@ -1809,6 +1837,10 @@ export class BasjooWidget {
         }
         case 'done': {
           const donePayload = payload as StreamDoneMeta;
+          if (donePayload.visitor_token) {
+            this.visitorToken = donePayload.visitor_token;
+            this.storage.setItem(this.VISITOR_TOKEN_STORAGE_KEY, donePayload.visitor_token);
+          }
           if (donePayload.session_id) {
             this.sessionId = donePayload.session_id;
             this.storage.setItem(this.STORAGE_KEY, donePayload.session_id);
@@ -1955,6 +1987,7 @@ export class BasjooWidget {
           headers: {
             'Content-Type': 'application/json',
             'Accept': 'text/event-stream',
+            ...this.getVisitorAuthHeaders(),
           },
           signal: this.streamAbortController.signal,
           body: JSON.stringify({

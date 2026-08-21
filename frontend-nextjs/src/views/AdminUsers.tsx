@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -26,6 +26,10 @@ export const AdminUsers = () => {
   const isMobile = useIsMobile();
   const { token, admin } = useAuth();
   const isSuperAdmin = admin?.role === 'super_admin';
+  const adminId = admin?.id;
+  const adminEmail = admin?.email;
+  const adminName = admin?.name;
+  const adminRole = admin?.role;
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
@@ -35,13 +39,17 @@ export const AdminUsers = () => {
   const [editData, setEditData] = useState({email: '',name: '',password: '',is_active: true,role: 'admin' as AdminRole});
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const translationRef = useRef(t);
+  translationRef.current = t;
   const availableRoleKeys = agentId ? agentRoleKeys : roleKeys;
-  const authHeaders = {
+  const authHeaders = useMemo(() => ({
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+  }), [token]);
 
-    const loadUsers = async () => {
+    const loadUsers = useCallback(async () => {
+      if (!token) return;
+
       if (agentId) {
         const data = await api.listAgentMembers(agentId);
         setUsers(data.members.map(member => ({
@@ -54,27 +62,26 @@ export const AdminUsers = () => {
         return;
       }
 
-      if (!isSuperAdmin && admin) {
+      if (!isSuperAdmin && adminId !== undefined && adminEmail !== undefined && adminName !== undefined && adminRole !== undefined) {
         setUsers([{
-          id: admin.id,
-          email: admin.email,
-          name: admin.name,
+          id: adminId,
+          email: adminEmail,
+          name: adminName,
           is_active: true,
-          role: admin.role as AdminRole,
+          role: adminRole as AdminRole,
         }]);
         return;
       }
 
       const res = await fetch('/api/admin/users', { headers: authHeaders });
-      if (!res.ok) throw new Error(await parseErrorResponse(res) || t('users.loadUsersFailed'));
+      if (!res.ok) throw new Error(await parseErrorResponse(res) || translationRef.current('users.loadUsersFailed'));
       const data = await res.json();
       setUsers(data);
-    };
+    }, [adminEmail, adminId, adminName, adminRole, agentId, authHeaders, isSuperAdmin, token]);
 
 useEffect(() => {
-  if (!token) return;
   loadUsers().catch((err) => setError(err.message));
-}, [token, isSuperAdmin, admin]);
+}, [loadUsers]);
 
 useEffect(() => {
   if (!agentId) return;

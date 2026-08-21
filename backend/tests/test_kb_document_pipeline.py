@@ -243,7 +243,9 @@ async def test_embed_texts_receives_api_key():
     mock_doc.chunk_count = 0
 
     with patch("services.kb_document_processor.database.AsyncSessionLocal") as mock_session_cls:
-        mock_session = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock()
+        mock_session.commit = AsyncMock()
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 

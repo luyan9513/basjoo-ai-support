@@ -49,6 +49,7 @@ describe('BasjooWidget storage fallback', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     // Restore original localStorage
     Object.defineProperty(window, 'localStorage', {
       value: originalLocalStorage,
@@ -132,7 +133,7 @@ describe('BasjooWidget storage fallback', () => {
     expect(visitorId2).toBe(visitorId);
   });
 
-  it('maintains session_id across widget operations when storage works', async () => {
+  it('loads an existing session only with its visitor token', async () => {
     const { mock: workingMock, store } = createWorkingMock();
 
     Object.defineProperty(window, 'localStorage', {
@@ -145,11 +146,54 @@ describe('BasjooWidget storage fallback', () => {
 
     // Pre-set a session ID
     store.set('basjoo_session_test-agent', 'session_12345');
+    store.set('basjoo_visitor_token_test-agent', 'visitor-token-12345');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/v1/config:public')) {
+        return { ok: true, json: async () => ({}) } as Response;
+      }
+      if (url.includes('/api/v1/chat/messages')) {
+        return { ok: true, json: async () => ([
+          { id: 1, role: 'assistant', content: 'Welcome back', sources: [] },
+        ]) } as Response;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
 
     const widget = new BasjooWidget({ agentId: 'test-agent', apiBase: 'http://localhost:8000' });
     await widget.init();
 
     // Session should be loaded from storage
     expect(store.get('basjoo_session_test-agent')).toBe('session_12345');
+    await vi.waitFor(() => {
+      const historyCall = fetchMock.mock.calls.find(([input]) =>
+        String(input).includes('/api/v1/chat/messages'),
+      );
+      expect(historyCall?.[1]?.headers).toEqual({
+        Authorization: 'Bearer visitor-token-12345',
+      });
+    });
+  });
+
+  it('clears a legacy session that has no visitor token', async () => {
+    const { mock: workingMock, store } = createWorkingMock();
+    Object.defineProperty(window, 'localStorage', {
+      value: workingMock,
+      writable: true,
+      configurable: true,
+    });
+    store.set('basjoo_session_test-agent', 'legacy-session');
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({}),
+    } as Response)));
+
+    const BasjooWidget = (window as any).BasjooWidget;
+    const widget = new BasjooWidget({ agentId: 'test-agent', apiBase: 'http://localhost:8000' });
+    await widget.init();
+
+    expect(store.has('basjoo_session_test-agent')).toBe(false);
+    expect(store.has('basjoo_visitor_token_test-agent')).toBe(false);
   });
 });

@@ -120,7 +120,7 @@ export default function Sessions() {
     } finally {
       setLoading(false)
     }
-  }, [filter, keyword, token])
+  }, [agentId, filter, keyword, token])
 
   const connectWebSocket = useCallback(() => {
     if (!token) return
@@ -170,7 +170,7 @@ export default function Sessions() {
     } catch {
       console.log('WebSocket not available')
     }
-  }, [fetchMessages, fetchSessions, token])
+  }, [agentId, fetchMessages, fetchSessions, token])
 
   useEffect(() => {
     isMountedRef.current = true

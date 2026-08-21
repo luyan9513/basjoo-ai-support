@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import AdminLayout from '../components/AdminLayout';
@@ -53,31 +53,43 @@ export default function AgentSettings() {
   const [error, setError] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const translationRef = useRef(t);
+  translationRef.current = t;
 
   useEffect(() => {
-    loadAgent();
-  }, [routeAgentId]);
+    let cancelled = false;
 
-  const loadAgent = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      let loadedAgent: Agent;
-      if (routeAgentId) {
-        loadedAgent = await api.getAgent(routeAgentId);
-      } else {
-        loadedAgent = await api.getDefaultAgent();
+    const loadAgent = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        let loadedAgent: Agent;
+        if (routeAgentId) {
+          loadedAgent = await api.getAgent(routeAgentId);
+        } else {
+          loadedAgent = await api.getDefaultAgent();
+        }
+        if (cancelled) return;
+        setAgent(loadedAgent);
+        const data = formDataFromAgent(loadedAgent);
+        setFormData(data);
+        setOriginsText(data.allowed_widget_origins.join('\n'));
+      } catch {
+        if (!cancelled) {
+          setError(translationRef.current('errors.loadFailed'));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-      setAgent(loadedAgent);
-      const data = formDataFromAgent(loadedAgent);
-      setFormData(data);
-      setOriginsText(data.allowed_widget_origins.join('\n'));
-    } catch (err) {
-      setError(t('errors.loadFailed'));
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    loadAgent();
+    return () => {
+      cancelled = true;
+    };
+  }, [routeAgentId]);
 
   const embedCode = useMemo(() => {
     if (!agent) return '';

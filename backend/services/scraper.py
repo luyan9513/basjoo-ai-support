@@ -4,7 +4,7 @@ import hashlib
 from typing import Dict, Any, List, Tuple
 import logging
 
-from services.url_safety import validate_url_safe
+from services.url_safety import url_log_reference, validate_url_safe
 from services.scrapling_client import get_scrapling_client
 from services.scraping_provider import fetch_with_provider, discover_with_provider
 
@@ -42,7 +42,7 @@ class URLScraper:
         # SSRF 安全检查
         safe, reason = validate_url_safe(url)
         if not safe:
-            logger.warning(f"Blocked unsafe fetch of {url}: {reason}")
+            logger.warning("Blocked unsafe fetch of %s: %s", url_log_reference(url), reason)
             return {
                 "success": False,
                 "error": f"Unsafe URL: {reason}",
@@ -65,17 +65,18 @@ class URLScraper:
 
             if result.get("success"):
                 logger.info(
-                    f"Successfully fetched {url} via Scrapling: {len(result.get('content', ''))} chars"
+                    "Successfully fetched %s via Scrapling: %s chars",
+                    url_log_reference(url), len(result.get("content", "")),
                 )
             else:
                 logger.warning(
-                    f"Scrapling fetch failed for {url}: {result.get('error')}"
+                    "Scrapling fetch failed for %s", url_log_reference(url),
                 )
 
             return result
 
         except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
+            logger.error("Error fetching %s: %s", url_log_reference(url), type(e).__name__)
             return {
                 "success": False,
                 "error": str(e),
@@ -107,7 +108,9 @@ class URLScraper:
         # SSRF 安全检查
         safe, reason = validate_url_safe(url)
         if not safe:
-            logger.warning(f"Blocked unsafe crawl seed URL {url}: {reason}")
+            logger.warning(
+                "Blocked unsafe crawl seed URL %s: %s", url_log_reference(url), reason
+            )
             return []
 
         try:
@@ -124,11 +127,16 @@ class URLScraper:
                 discovered = await client.discover_subpages(
                     url, max_depth=max_depth, max_pages=max_pages
                 )
-            logger.info(f"Discovered {len(discovered)} subpages from {url}")
+            logger.info(
+                "Discovered %s subpages from %s", len(discovered), url_log_reference(url)
+            )
             return discovered
 
         except Exception as e:
-            logger.error(f"Error discovering subpages from {url}: {e}")
+            logger.error(
+                "Error discovering subpages from %s: %s",
+                url_log_reference(url), type(e).__name__,
+            )
             return []
 
 

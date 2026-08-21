@@ -19,7 +19,7 @@ write_http_content_conf() {
 server {
     listen 8080;
     server_name $1;
-    client_max_body_size 12m;
+    client_max_body_size 105m;
 
     # Baseline security headers for HTTP mode (HSTS only applies to HTTPS)
     add_header X-Content-Type-Options "nosniff" always;
@@ -46,7 +46,7 @@ write_https_conf() {
 server {
     listen 8443 ssl;
     server_name $1;
-    client_max_body_size 12m;
+    client_max_body_size 105m;
 
     ssl_certificate $CERT_PATH;
     ssl_certificate_key $SSL_KEY;
@@ -77,6 +77,13 @@ server {
     location = /health {
         access_log off;
         proxy_pass http://backend-prod:8000/health;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+    }
+
+    location = /ready {
+        access_log off;
+        proxy_pass http://backend-prod:8000/ready;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
     }
@@ -114,6 +121,14 @@ server {
     location = /health {
         access_log off;
         proxy_pass http://backend-prod:8000/health;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+    }
+
+
+    location = /ready {
+        access_log off;
+        proxy_pass http://backend-prod:8000/ready;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
     }

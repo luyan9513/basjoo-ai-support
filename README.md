@@ -17,7 +17,7 @@ Basjoo is an AI customer-support platform with three main parts:
 - a **Next.js admin/dashboard frontend** in `frontend-nextjs/`
 - an **embeddable chat widget** in `widget/` that talks to the backend over HTTP and SSE
 
-The stack uses **SQLite** for application data, **Redis** for rate limiting, **Qdrant** for vector search and document indexing, a **Scrapling microservice** for web content fetching, and **nginx** for Docker-based reverse proxying. Docker Compose also starts a PostgreSQL/pgvector service in its dev and prod profiles, but the backend is not wired to it and no PostgreSQL driver is installed.
+The stack uses **SQLite** for application data, **Redis** for rate limiting, **Qdrant** for vector search and document indexing, a **Scrapling microservice** for web content fetching, and **nginx** for Docker-based reverse proxying. PostgreSQL/pgvector is available only through the opt-in `experimental-db` profile; the backend is not wired to it and no PostgreSQL driver is installed.
 
 ## Suggested environment
 
@@ -36,8 +36,8 @@ Basjoo runs as a set of Docker containers. All LLM inference and embedding calls
 For a blank Ubuntu or Debian server, run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/luyan9513/basjoo-rag-saas/main/install-deploy.sh | \
-  sudo env BASJOO_REPO_URL=https://github.com/luyan9513/basjoo-rag-saas BASJOO_BRANCH=main sh
+curl -fsSL https://raw.githubusercontent.com/luyan9513/basjoo-ai-support/main/install-deploy.sh | \
+  sudo env BASJOO_REPO_URL=https://github.com/luyan9513/basjoo-ai-support BASJOO_BRANCH=main sh
 ```
 
 If you already have this repository checked out locally, you can also run:
@@ -135,15 +135,15 @@ The widget provides the visitor-facing chat window with persisted sessions, mult
 - SQLAlchemy async + SQLite
 - Redis (rate limiting, caching)
 - Qdrant client/API (dense vector search, document indexing, and tenant/KB payload filtering)
-- PostgreSQL/pgvector Compose service (started by dev/prod profiles but currently not used by the backend)
+- PostgreSQL/pgvector Compose service (opt-in `experimental-db` profile; not used by the backend)
 - Scrapling microservice (curl_cffi + readability-lxml web content extraction)
 - APScheduler
 - Provider SDKs for OpenAI-compatible APIs, Anthropic, and Google Gemini
 
 ### Frontend
 
-- Next.js 14
-- React 18
+- Next.js 15.5.21
+- React 19.2.8
 - TypeScript
 - i18next
 
@@ -182,7 +182,7 @@ Default dev ports:
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:8000`
 - Qdrant: `http://localhost:6333`
-- PostgreSQL Compose service: `127.0.0.1:5432` (started by dev/prod profiles; not used by the backend)
+- PostgreSQL Compose service: `127.0.0.1:5432` (only with `experimental-db`; not used by the backend)
 - Redis: `127.0.0.1:6379`
 
 The dev frontend and backend ports are bound as `3000:3000` and `8000:8000`, so they are reachable from other devices that can access the host.
@@ -203,13 +203,14 @@ Backend health check:
 
 ```bash
 curl http://localhost:8000/health
+curl http://localhost:8000/ready
 ```
 
 #### Frontend
 
 ```bash
 cd frontend-nextjs
-npm install
+npm ci
 npm run dev
 ```
 
@@ -217,7 +218,7 @@ npm run dev
 
 ```bash
 cd widget
-npm install
+npm ci
 npm run dev
 ```
 
@@ -226,7 +227,7 @@ npm run dev
 ### Frontend (`frontend-nextjs/`)
 
 ```bash
-npm install
+npm ci
 npm run dev
 npm run build
 npm run start        # production build locally
@@ -238,7 +239,7 @@ npm run test         # vitest
 ### Widget (`widget/`)
 
 ```bash
-npm install
+npm ci
 npm run dev          # dev bundle + example server
 npm run build        # full build (typecheck + dev + prod bundles)
 npm run build:dev    # unminified ESM bundle (dist/basjoo-widget.js)
@@ -448,17 +449,17 @@ pytest -q \
 ## Deployment notes
 
 - `docker-compose.yml` is the main orchestration entrypoint.
-- `install-deploy.sh` is the one-command production installer/deployer for Ubuntu and Debian. It can auto-install Docker/Compose, clone the repo, and force-sync an existing clone to the chosen remote branch before deploying.
-- nginx currently sets `client_max_body_size 12m`. This is enough for payloads just above the backend's 10 MiB default limit to receive its JSON 413 response, but it also means proxied uploads are capped below the backend's 20 MiB per-file allowance.
+- `install-deploy.sh` is the one-command production installer/deployer for Ubuntu and Debian. It can auto-install Docker/Compose and clone or update the repo. Destructive reset/clean and swap changes are disabled unless their explicit opt-in environment variables are set.
+- nginx and the backend upload path both allow up to 105 MiB request bodies; ordinary non-upload backend requests remain limited to 10 MiB. The application counts actual streamed bytes instead of trusting only `Content-Length`.
 - Optional HTTPS is enabled only when readable certificate and key files exist in `./ssl`.
 - When certificates are present, nginx serves HTTPS on port 443 and redirects HTTP requests on port 80 to HTTPS automatically.
-- `SERVER_DOMAIN` can be set for the nginx service to enforce a canonical hostname. When set, nginx serves only that host, rejects direct IP or unexpected Host access with nginx 444, and keeps `/health` available for load balancer probes.
+- `SERVER_DOMAIN` can be set for the nginx service to enforce a canonical hostname. When set, nginx serves only that host, rejects direct IP or unexpected Host access with nginx 444, and keeps `/health` available for liveness probes. Use `/ready` for dependency readiness.
 - If `SERVER_DOMAIN` is not set, nginx keeps accepting requests by the incoming host as before.
 - Backend responses that bypass standard middleware should still apply CORS headers so embedded widget requests do not fail cross-origin.
 - The backend persists the default widget agent ID to `/app/data/.agent_id`. As long as the backend data volume is preserved, existing widget embed codes keep working after redeployments.
 - If you know an older widget agent ID that must keep working, set `DEFAULT_AGENT_ID=agt_xxxxxxxxxxxx` before first boot of the new deployment.
 - Avoid `docker compose down -v` or deleting the backend data volume unless you are intentionally rotating widget/embed identity.
-- The one-command installer only force-resets repository files; it does not delete Docker named volumes, so `/app/data` persistence remains intact across redeployments.
+- The one-command installer preserves Docker named volumes. Destructive repository reset/clean requires explicit opt-in and should be reviewed before use.
 
 ### Preserving existing widget embeds across redeployments
 

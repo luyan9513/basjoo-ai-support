@@ -7,13 +7,19 @@ ENV BACKEND_PROXY_TARGET=$BACKEND_PROXY_TARGET
 ENV NODE_OPTIONS=--max-old-space-size=1024
 
 COPY package*.json ./
-RUN npm ci --prefer-offline --no-audit
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --prefer-offline --no-audit \
+    --fetch-retries=5 \
+    --fetch-retry-mintimeout=1000 \
+    --fetch-retry-maxtimeout=10000
 
-COPY next.config.mjs tsconfig.json next-env.d.ts ./
+COPY next.config.mjs tsconfig.json next-env.d.ts .eslintrc.json eslint.config.mjs ./
 COPY app ./app
 COPY src ./src
 COPY public ./public
 
+RUN npm run typecheck
+RUN npm run lint
 RUN npm run build
 
 FROM node:20-alpine AS runner

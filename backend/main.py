@@ -19,10 +19,10 @@ from services.scheduler import (
     session_auto_close_scheduler,
 )
 from services.redis_service import get_redis, close_redis
-from middleware import RateLimitMiddleware, apply_cors_headers, get_request_client_ip
-from middleware.rate_limit import hash_client_ip
+from middleware import RateLimitMiddleware, RequestBodyLimitMiddleware
 from middleware.rate_limit import apply_cors_headers as apply_early_cors_headers
 from i18n.core import I18nMiddleware
+from services.readiness_service import check_readiness
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper()),
@@ -132,45 +132,6 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests(request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length:
-        content_length = int(content_length)
-        from constants import DEFAULT_BODY_SIZE_LIMIT, FILE_UPLOAD_BODY_LIMIT
-
-        path = request.url.path
-        path_parts = path.strip("/").split("/")
-        is_kb_document_upload = (
-            request.method.upper() == "POST"
-            and len(path_parts) == 6
-            and path_parts[0] == "api"
-            and path_parts[1] == "tenants"
-            and bool(path_parts[2])
-            and path_parts[3] == "knowledge_bases"
-            and bool(path_parts[4])
-            and path_parts[5] == "documents"
-        )
-
-        # Route-aware sizing: file and KB document uploads accept larger bodies.
-        if path.startswith("/api/v1/files:upload") or is_kb_document_upload:
-            max_size = FILE_UPLOAD_BODY_LIMIT
-        else:
-            max_size = DEFAULT_BODY_SIZE_LIMIT
-        if content_length > max_size:
-            logger.warning(
-                "Request too large: %s bytes from client_hash=%s",
-                content_length,
-                hash_client_ip(get_request_client_ip(request)),
-            )
-            from fastapi.responses import JSONResponse
-
-            response = JSONResponse(
-                status_code=413,
-                content={
-                    "detail": f"请求体过大，最大允许 {max_size // (1024 * 1024)}MB"
-                },
-            )
-            return apply_cors_headers(request, response)
-
     logger.info(f"REQUEST: {request.method} {request.url.path}")
     try:
         response = await call_next(request)
@@ -181,6 +142,11 @@ async def log_requests(request, call_next):
     except Exception as e:
         logger.exception(f"ERROR processing {request.method} {request.url.path}: {e}")
         raise
+
+
+# Keep this pure ASGI middleware outermost so streamed/chunked bodies are counted
+# before BaseHTTPMiddleware or route parsing can consume them.
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -239,6 +205,22 @@ async def get_widget_demo():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+@app.get("/ready")
+async def readiness_check():
+    checks = await check_readiness()
+    ready = all(checks.values())
+    payload = {
+        "status": "ready" if ready else "not_ready",
+        "checks": {
+            name: "ok" if available else "unavailable"
+            for name, available in checks.items()
+        },
+    }
+    if ready:
+        return payload
+    return JSONResponse(status_code=503, content=payload)
 
 
 @app.get("/")

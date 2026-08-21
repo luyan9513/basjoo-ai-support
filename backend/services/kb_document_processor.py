@@ -1,6 +1,5 @@
 """KB document upload processor: save, background process (parse→chunk→embed→Qdrant), delete, progress."""
 
-import contextlib
 import logging
 import os
 import uuid
@@ -15,14 +14,12 @@ from core.encryption import decrypt_api_key
 from models import Agent, KbChunk, KbDocument
 from services.document_parser import DocumentParser, INVALID_TEXT_EMPTY_MESSAGE
 from services.kb_service import KbService
-from services.qdrant_service import QdrantKbService
+from services.qdrant_service import QdrantKbService, require_delete_outcome
 
 logger = logging.getLogger(__name__)
 
 # Configurable upload root - defaults to /app/data/kb_uploads in production,
 # can be overridden via environment variable for tests
-import os
-
 UPLOAD_ROOT = Path(os.environ.get("KB_UPLOAD_ROOT", "/app/data/kb_uploads"))
 
 PROCESSING_ERROR_MESSAGE_MAX_LENGTH = 500
@@ -232,27 +229,36 @@ class KbDocumentProcessor:
     async def delete_document(
         self, tenant_id: str, kb_id: str, doc_id: str, db: AsyncSession
     ):
-        """Full delete: Qdrant points → chunks → doc → file."""
-        # 1. Qdrant
-        await self.qdrant.delete_points_by_doc_id(kb_id, doc_id)
-
-        # 2. chunks (tenant filter)
-        await db.execute(
-            delete(KbChunk).where(
-                KbChunk.doc_id == doc_id, KbChunk.tenant_id == tenant_id
-            )
-        )
-
-        # 3. doc
+        """Full fail-closed delete: target → Qdrant → SQLite → stored file."""
         stmt = select(KbDocument).where(
-            KbDocument.id == doc_id, KbDocument.tenant_id == tenant_id
+            KbDocument.id == doc_id,
+            KbDocument.kb_id == kb_id,
+            KbDocument.tenant_id == tenant_id,
         )
         res = await db.execute(stmt)
         doc = res.scalar_one_or_none()
-        storage_path = str(getattr(doc, "storage_path", "")) if doc else ""
-        if doc and storage_path and os.path.exists(storage_path):
-            with contextlib.suppress(Exception):
-                os.remove(storage_path)
-        if doc:
-            await db.delete(doc)
-        await db.commit()
+        if not doc:
+            return "not_found"
+        storage_path = str(getattr(doc, "storage_path", "") or "")
+
+        qdrant_result = require_delete_outcome(
+            await self.qdrant.delete_points_by_doc_id(kb_id, doc_id)
+        )
+
+        await db.execute(
+            delete(KbChunk).where(
+                KbChunk.doc_id == doc_id,
+                KbChunk.kb_id == kb_id,
+                KbChunk.tenant_id == tenant_id,
+            )
+        )
+        await db.delete(doc)
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+        if storage_path and os.path.exists(storage_path):
+            os.remove(storage_path)
+        return qdrant_result

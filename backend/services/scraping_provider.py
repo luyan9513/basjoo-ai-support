@@ -9,6 +9,7 @@ import httpx
 
 from config import settings
 from services.scrapling_client import get_scrapling_client
+from services.url_safety import url_log_reference
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,10 @@ async def fetch_with_provider(
                 try:
                     return await _cloud_fetch(url)
                 except Exception as exc:
-                    logger.warning("Cloud scraping failed for %s: %s", url, exc)
+                    logger.warning(
+                        "Cloud scraping failed for %s: %s",
+                        url_log_reference(url), type(exc).__name__,
+                    )
                     return {"success": False, "error": str(exc)}
 
             local_result = await get_scrapling_client().fetch(url)
@@ -91,7 +95,10 @@ async def fetch_with_provider(
                     if cloud_result.get("success"):
                         return cloud_result
                 except Exception as exc:
-                    logger.warning("Cloud fallback scraping failed for %s: %s", url, exc)
+                    logger.warning(
+                        "Cloud fallback scraping failed for %s: %s",
+                        url_log_reference(url), type(exc).__name__,
+                    )
 
             return local_result
 

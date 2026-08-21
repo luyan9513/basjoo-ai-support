@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Tuple
 from datetime import datetime, timezone
 
 from config import settings
+from services.url_safety import url_log_reference
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +45,19 @@ class ScraplingClient:
                 return data
 
         except httpx.TimeoutException:
-            logger.error(f"Timeout fetching {url} via Scrapling service ({self.timeout}s)")
+            logger.error(
+                "Timeout fetching %s via Scrapling service (%ss)",
+                url_log_reference(url), self.timeout,
+            )
             return {"success": False, "error": f"Timeout after {self.timeout} seconds"}
         except httpx.ConnectError:
             logger.error(f"Cannot connect to Scrapling service at {self.base_url}")
             return {"success": False, "error": "Scrapling service unavailable"}
         except Exception as e:
-            logger.error(f"Scrapling client error for {url}: {e}")
+            logger.error(
+                "Scrapling client error for %s: %s",
+                url_log_reference(url), type(e).__name__,
+            )
             return {"success": False, "error": str(e)}
 
     async def discover_subpages(
@@ -86,13 +93,19 @@ class ScraplingClient:
                 return [(item["url"], item["depth"]) for item in data.get("urls", [])]
 
         except httpx.TimeoutException:
-            logger.error(f"Timeout discovering subpages from {url} via Scrapling service")
+            logger.error(
+                "Timeout discovering subpages from %s via Scrapling service",
+                url_log_reference(url),
+            )
             return []
         except httpx.ConnectError:
             logger.error(f"Cannot connect to Scrapling service at {self.base_url}")
             return []
         except Exception as e:
-            logger.error(f"Scrapling client error discovering subpages from {url}: {e}")
+            logger.error(
+                "Scrapling client error discovering subpages from %s: %s",
+                url_log_reference(url), type(e).__name__,
+            )
             return []
 
     async def health_check(self) -> bool:

@@ -3,13 +3,15 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 DOCKER_BIN=${BASJOO_DOCKER_BIN:-docker}
+BASJOO_ENABLE_SWAP=${BASJOO_ENABLE_SWAP:-0}
 
 SUDO=
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
   SUDO=sudo
 fi
 
-if ! swapon --noheadings --show 2>/dev/null | grep -q '[^[:space:]]'; then
+if ! swapon --noheadings --show 2>/dev/null | grep -q '[^[:space:]]' && \
+  { [ "$BASJOO_ENABLE_SWAP" = "1" ] || [ "$BASJOO_ENABLE_SWAP" = "true" ] || [ "$BASJOO_ENABLE_SWAP" = "yes" ]; }; then
   printf '%s\n' '==> No swap detected. Creating 2GB swap file for Next.js build...'
   if [ -f /swapfile ]; then
     printf '%s\n' '==> Existing /swapfile found but not active, re-enabling...'
@@ -33,6 +35,8 @@ if ! swapon --noheadings --show 2>/dev/null | grep -q '[^[:space:]]'; then
     ${SUDO} swapon /swapfile
   fi
   printf '%s\n' '==> Swap enabled. Next.js build should now have enough memory.'
+elif ! swapon --noheadings --show 2>/dev/null | grep -q '[^[:space:]]'; then
+  printf '%s\n' '==> No swap detected. Leaving system swap unchanged (set BASJOO_ENABLE_SWAP=1 to opt in).'
 fi
 
 printf '%s\n' '==> Preparing .env for zero-config deployment'

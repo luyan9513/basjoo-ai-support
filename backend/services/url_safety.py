@@ -1,7 +1,7 @@
 """URL safety validation to prevent SSRF attacks."""
 
-from functools import lru_cache
 import ipaddress
+import hashlib
 import logging
 import socket
 from urllib.parse import urlsplit
@@ -11,6 +11,16 @@ logger = logging.getLogger(__name__)
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 
+def url_log_reference(url: str) -> str:
+    """Return a stable URL reference without path, query, or credentials."""
+    try:
+        hostname = (urlsplit(url).hostname or "invalid-host").lower()
+    except ValueError:
+        hostname = "invalid-host"
+    url_hash = hashlib.sha256(url.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"host={hostname[:253]} url_hash={url_hash}"
+
+
 def _is_unsafe_ip(host: str) -> bool:
     """Check if a resolved IP or literal IP falls in unsafe ranges."""
     try:
@@ -18,20 +28,11 @@ def _is_unsafe_ip(host: str) -> bool:
     except ValueError:
         return False
 
-    # 198.18.0.0/15 is IANA benchmarking range (RFC 2544).
-    # Some hosting providers assign real public websites from this range,
-    # and Python's ipaddress classifies it as is_private incorrectly.
-    if addr in ipaddress.ip_network("198.18.0.0/15"):
-        return False
-
-    if addr.is_loopback or addr.is_private:
-        return True
-    if addr.is_link_local or addr.is_multicast or addr.is_unspecified:
-        return True
-    return False
+    # Only globally routable addresses are valid fetch targets. This also blocks
+    # benchmark, documentation, carrier-grade NAT and other special-use ranges.
+    return not addr.is_global
 
 
-@lru_cache(maxsize=512)
 def _resolve_and_check(hostname: str) -> tuple[bool, str]:
     """Resolve hostname and check all resolved IPs for safety."""
     try:

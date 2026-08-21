@@ -6,9 +6,9 @@ This is the primary reference for AI coding agents (Pi, Claude, Cursor, Aider, e
 ## Project overview
 Docker-oriented AI customer support platform:
 - FastAPI backend with self-developed multi-tenant KB (Qdrant-backed RAG), streaming chat (SSE), knowledge ingestion, admin auth, quotas.
-- Next.js 14 (App Router) admin dashboard in `frontend-nextjs/`.
+- Next.js 15 (App Router) + React 19 admin dashboard in `frontend-nextjs/`.
 - Embeddable TypeScript widget in `widget/` (localStorage sessions, SSE, human takeover).
-- Supporting: Scrapling microservice, Qdrant (vector DB), Redis, PostgreSQL, nginx.
+- Supporting: Scrapling microservice, Qdrant (vector DB), Redis, nginx, plus an opt-in experimental PostgreSQL service not wired to the backend.
 All LLM calls to external providers; embeddings via self-KB (Jina/SiliconFlow/OpenAI-compatible).
 
 ## Repository layout
@@ -23,8 +23,8 @@ All LLM calls to external providers; embeddings via self-KB (Jina/SiliconFlow/Op
 ## Required tools and setup
 - Dev stack: `docker compose --profile dev up --watch`.
 - Backend local: `cd backend && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 main.py`.
-- Frontend: `cd frontend-nextjs && npm install`.
-- Widget: `cd widget && npm install`.
+- Frontend: `cd frontend-nextjs && npm ci`.
+- Widget: `cd widget && npm ci`.
 - Environment: documented in `.env.example`; `SECRET_KEY`, `ENCRYPTION_KEY`, `DEFAULT_AGENT_ID` auto-persisted to `/app/data/` (preserve volume in prod). Never commit secrets.
 
 ## Development commands
@@ -39,7 +39,7 @@ All LLM calls to external providers; embeddings via self-KB (Jina/SiliconFlow/Op
 - E2E (all): `npm run test:e2e:all`
 - E2E (widget): `npm run test:e2e:widget`
 - Docker rebuild: `docker compose --profile dev up -d --build <service>`.
-- Health: `curl http://localhost:8000/health`.
+- Liveness: `curl http://localhost:8000/health`; dependency readiness: `curl http://localhost:8000/ready`.
 
 ## Must-follow conventions
 - **Structure**: Backend logic strictly in `backend/services/`; thin routers in `backend/api/`. Models in `backend/models.py`. Frontend views in `src/views/`, shared in `src/components/`, hooks in `src/hooks/`. Widget self-contained in `widget/src/`.
@@ -100,7 +100,7 @@ All LLM calls to external providers; embeddings via self-KB (Jina/SiliconFlow/Op
 - Maintains backward compatibility for existing script embeds (agent ID persistence).
 
 ## Safety and operational notes
-- Persistent volumes (`/app/data`, redis-data, postgres-data) critical; `install-deploy.sh` preserves them.
+- Persistent volumes (`/app/data`, redis-data, qdrant-data) are critical; PostgreSQL is only in the opt-in `experimental-db` profile and is not the application database.
 - `Origin: null` CORS only when `cors_allow_null_origin=true`; missing Origin gets no wildcard.
 - Ask before destructive ops (full DB reset, prod deploy, archive changes without `--yes`).
 - Qdrant collection IDs and task locks are process-scoped or Redis-backed; do not assume cross-restart persistence for caches.
@@ -117,4 +117,4 @@ Prefer `ctx_*` family to protect context window. Follow superpowers skills (TDD 
 
 **This is living documentation. Update when patterns change.**
 
-Last updated: 2026-06-05 (removed non-existent openspec reference, added docs directory structure, verified commands and architecture against current codebase)
+Last updated: 2026-08-21 (aligned Next.js/React, dependency, readiness, and optional PostgreSQL guidance with the verified stack)

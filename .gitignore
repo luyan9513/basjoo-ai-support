@@ -147,6 +147,8 @@ init_test.py
 !backend/tests/test_*.py
 !backend/tests/*_test.py
 !backend/tests/init_test.py
+!scrapling-service/test_*.py
+!nginx/test_*.py
 
 # OS生成的文件
 .Spotlight-V100

@@ -103,6 +103,7 @@ def ensure_project_env_file(project_root: Path | None = None) -> Path:
             env_text = _upsert_env_value(env_text, key, generator())
 
     env_path.write_text(env_text, encoding="utf-8")
+    env_path.chmod(0o600)
     return env_path
 
 

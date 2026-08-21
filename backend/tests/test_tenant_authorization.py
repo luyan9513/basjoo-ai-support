@@ -200,7 +200,9 @@ async def test_delete_kb_with_wrong_tenant_does_not_delete_target(setup_test_db)
         kb_a_id = kb_a.id
 
         service = KbService(session=session)
-        with patch.object(service.qdrant, "delete_collection", new=AsyncMock()):
+        with patch.object(
+            service.qdrant, "delete_collection", new=AsyncMock(return_value="deleted")
+        ):
             await service.delete_knowledge_base(tenant_b.id, kb_a_id)
 
         remaining = await session.get(KnowledgeBase, kb_a_id)
@@ -216,7 +218,8 @@ async def test_other_workspace_admin_cannot_delete_kb(
     own = await _build_tenant_graph("tenant-delete-own", use_existing_workspace=True)
     other = await _build_tenant_graph("tenant-delete-other", use_existing_workspace=False)
     monkeypatch.setattr(
-        "api.v1.kb_document_endpoints.kb_svc.qdrant.delete_collection", AsyncMock()
+        "api.v1.kb_document_endpoints.kb_svc.qdrant.delete_collection",
+        AsyncMock(return_value="deleted"),
     )
 
     transport = ASGITransport(app=app)

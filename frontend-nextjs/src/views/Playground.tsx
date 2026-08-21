@@ -43,11 +43,7 @@ export default function Playground() {
   const streamAbortControllerRef = useRef<AbortController | null>(null);
   const streamRequestIdRef = useRef(0);
 
-  useEffect(() => {
-    loadDefaultAgent();
-  }, [routeAgentId]);
-
-  const loadDefaultAgent = async () => {
+  const loadDefaultAgent = useCallback(async () => {
     try {
       const pathAgentId = typeof window !== 'undefined'
         ? window.location.pathname.match(/\/agents\/([^/]+)/)?.[1]
@@ -64,7 +60,11 @@ export default function Playground() {
     } catch (error) {
       console.error('Failed to load default agent:', error);
     }
-  };
+  }, [routeAgentId]);
+
+  useEffect(() => {
+    loadDefaultAgent();
+  }, [loadDefaultAgent]);
 
   const getErrorMessage = useCallback((error: unknown): string => {
     if (!(error instanceof Error)) {

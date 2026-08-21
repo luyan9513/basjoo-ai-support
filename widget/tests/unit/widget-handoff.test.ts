@@ -21,6 +21,7 @@ describe('BasjooWidget human handoff', () => {
     document.title = 'Widget test';
     window.localStorage.clear();
     window.localStorage.setItem('basjoo_session_agent-handoff', 'public-session-1');
+    window.localStorage.setItem('basjoo_visitor_token_agent-handoff', 'visitor-token-1');
   });
 
   afterEach(() => {
@@ -90,6 +91,9 @@ describe('BasjooWidget human handoff', () => {
       String(input).includes('/api/v1/chat/handoff'),
     );
     expect(handoffCalls).toHaveLength(1);
+    expect(handoffCalls[0]?.[1]?.headers).toMatchObject({
+      Authorization: 'Bearer visitor-token-1',
+    });
     widget.destroy();
   });
 });

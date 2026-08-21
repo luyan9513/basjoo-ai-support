@@ -13,8 +13,7 @@ from typing import List, Optional
 from urllib.parse import urljoin, urlparse, urlsplit
 
 from bs4 import BeautifulSoup
-import httpx
-from curl_cffi import requests as curl_requests
+from curl_cffi import CurlOpt, requests as curl_requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from readability import Document
@@ -32,23 +31,25 @@ DEFAULT_HEADERS = {
 }
 
 
+def _url_log_reference(url: str) -> str:
+    """Return a stable URL reference without path, query, or credentials."""
+    try:
+        hostname = (urlsplit(url).hostname or "invalid-host").lower()
+    except ValueError:
+        hostname = "invalid-host"
+    url_hash = hashlib.sha256(url.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"host={hostname[:253]} url_hash={url_hash}"
+
+
 def _is_unsafe_ip(host: str) -> bool:
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
         return False
-    if addr in ipaddress.ip_network("198.18.0.0/15"):
-        return False
-    return (
-        addr.is_loopback
-        or addr.is_private
-        or addr.is_link_local
-        or addr.is_multicast
-        or addr.is_unspecified
-    )
+    return not addr.is_global
 
 
-def _validate_fetch_url_safe(url: str):
+def _validate_fetch_url_safe(url: str) -> tuple[str, ...]:
     parsed = urlsplit(url)
     if parsed.scheme.lower() not in {"http", "https"}:
         raise ValueError("Unsafe redirect target scheme")
@@ -63,32 +64,42 @@ def _validate_fetch_url_safe(url: str):
     except ValueError as e:
         if "Unsafe" in str(e):
             raise
+    resolved_ips = []
     for info in socket.getaddrinfo(hostname, None):
-        if _is_unsafe_ip(info[4][0]):
+        resolved_ip = info[4][0]
+        if _is_unsafe_ip(resolved_ip):
             raise ValueError("Unsafe redirect target resolved IP")
+        if resolved_ip not in resolved_ips:
+            resolved_ips.append(resolved_ip)
+    if not resolved_ips:
+        raise ValueError("Redirect target did not resolve to a public IP")
+    return tuple(resolved_ips)
 
 
-def _curl_get(url: str, timeout: int):
+def _curl_get(url: str, timeout: int, resolved_ips: tuple[str, ...]):
+    parsed = urlsplit(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Fetch URL has no hostname")
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    addresses = ",".join(
+        f"[{address}]" if ":" in address else address for address in resolved_ips
+    )
     return curl_requests.get(
         url,
         headers=DEFAULT_HEADERS,
         timeout=timeout,
         impersonate="chrome120",
         allow_redirects=False,
-    )
-
-
-def _httpx_get(url: str, timeout: int):
-    return httpx.get(
-        url, headers=DEFAULT_HEADERS, timeout=timeout, follow_redirects=False
+        curl_options={CurlOpt.RESOLVE: [f"{hostname}:{port}:{addresses}"]},
     )
 
 
 def _fetch_following_safe_redirects(url: str, timeout: int, getter):
     current_url = url
     for _ in range(6):
-        _validate_fetch_url_safe(current_url)
-        resp = getter(current_url, timeout)
+        resolved_ips = _validate_fetch_url_safe(current_url)
+        resp = getter(current_url, timeout, resolved_ips)
         status_code = resp.status_code
         if status_code not in {301, 302, 303, 307, 308}:
             return (
@@ -110,11 +121,9 @@ def _fetch_following_safe_redirects(url: str, timeout: int, getter):
 
 
 def _fetch_with_fallback(url: str, timeout: int = 30):
-    try:
-        return _fetch_following_safe_redirects(url, timeout, _curl_get)
-    except Exception as e:
-        logger.warning(f"curl_cffi failed for {url}: {e}, falling back to httpx")
-        return _fetch_following_safe_redirects(url, timeout, _httpx_get)
+    # A normal httpx fallback would resolve DNS again and reopen the SSRF race.
+    # Fail closed unless the fallback can also bind the validated address.
+    return _fetch_following_safe_redirects(url, timeout, _curl_get)
 
 
 class FetchRequest(BaseModel):
@@ -303,7 +312,7 @@ def _extract_content(html: str, url: str) -> tuple:
 @app.post("/fetch", response_model=FetchResponse)
 async def fetch_url(request: FetchRequest):
     try:
-        logger.info(f"Fetching URL: {request.url}")
+        logger.info("Fetching URL %s", _url_log_reference(request.url))
 
         html, status_code, final_url, content_type = _fetch_with_fallback(
             request.url, request.timeout
@@ -364,7 +373,10 @@ async def fetch_url(request: FetchRequest):
             "fetcher": "scrapling",
         }
 
-        logger.info(f"Successfully fetched {request.url}: {len(content_text)} chars")
+        logger.info(
+            "Successfully fetched %s: %s chars",
+            _url_log_reference(request.url), len(content_text),
+        )
         return FetchResponse(
             title=title or "",
             content=content_text,
@@ -374,7 +386,10 @@ async def fetch_url(request: FetchRequest):
         )
 
     except Exception as e:
-        logger.error(f"Error fetching {request.url}: {e}")
+        logger.error(
+            "Error fetching %s: %s",
+            _url_log_reference(request.url), type(e).__name__,
+        )
         error_str = str(e)
 
         # Provide user-friendly error messages for common SSL/TLS issues
@@ -447,7 +462,8 @@ def _extract_links_from_html(
 async def discover_links(request: DiscoverRequest):
     try:
         logger.info(
-            f"Discovering links from: {request.url} with max_depth={request.max_depth}, max_pages={request.max_pages}"
+            "Discovering links from %s with max_depth=%s, max_pages=%s",
+            _url_log_reference(request.url), request.max_depth, request.max_pages,
         )
 
         # Parse the seed URL
@@ -472,7 +488,7 @@ async def discover_links(request: DiscoverRequest):
         seen_urls = {seed_url}
         discovered = [{"url": seed_url, "depth": 0}]
 
-        logger.info(f"Starting BFS crawl from seed: {seed_url}")
+        logger.info("Starting BFS crawl from seed %s", _url_log_reference(seed_url))
 
         while queue and len(discovered) < request.max_pages:
             current_url, current_depth = queue.popleft()
@@ -481,13 +497,18 @@ async def discover_links(request: DiscoverRequest):
             if current_depth >= request.max_depth:
                 continue
 
-            logger.debug(f"Fetching {current_url} at depth {current_depth}")
+            logger.debug(
+                "Fetching %s at depth %s",
+                _url_log_reference(current_url), current_depth,
+            )
 
             try:
                 html, status_code, _, _ = _fetch_with_fallback(current_url, 30)
 
                 if status_code >= 400:
-                    logger.warning(f"HTTP {status_code} for {current_url}")
+                    logger.warning(
+                        "HTTP %s for %s", status_code, _url_log_reference(current_url)
+                    )
                     continue
 
                 # Extract links from the page
@@ -514,16 +535,25 @@ async def discover_links(request: DiscoverRequest):
                         break
 
             except Exception as e:
-                logger.warning(f"Error fetching {current_url}: {e}")
+                logger.warning(
+                    "Error fetching %s: %s",
+                    _url_log_reference(current_url), type(e).__name__,
+                )
                 continue
 
-        logger.info(f"Discovered {len(discovered)} links from {request.url}")
+        logger.info(
+            "Discovered %s links from %s",
+            len(discovered), _url_log_reference(request.url),
+        )
         return DiscoverResponse(urls=discovered[: request.max_pages])
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error discovering links from {request.url}: {e}")
+        logger.error(
+            "Error discovering links from %s: %s",
+            _url_log_reference(request.url), type(e).__name__,
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 

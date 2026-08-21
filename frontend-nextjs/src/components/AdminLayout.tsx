@@ -1,6 +1,13 @@
 "use client";
 
-import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
+import {
+	type ReactElement,
+	type ReactNode,
+	useState,
+	useEffect,
+	useRef,
+	useCallback,
+} from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useTranslation } from "react-i18next";
@@ -15,7 +22,7 @@ interface AdminLayoutProps {
 interface NavItem {
 	path: string;
 	i18nKey: string;
-	icon: JSX.Element;
+	icon: ReactElement;
 	children?: NavItem[];
 }
 

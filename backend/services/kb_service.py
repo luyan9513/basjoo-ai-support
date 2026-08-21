@@ -9,7 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import AsyncSessionLocal
 from models import Agent, KnowledgeBase, KbChunk, KbDocument, Tenant
-from services.qdrant_service import QdrantKbService, get_kb_collection_name
+from services.qdrant_service import (
+    QdrantKbService,
+    get_kb_collection_name,
+    require_delete_outcome,
+)
 from services.task_lock import TaskType, task_lock
 
 logger = logging.getLogger(__name__)
@@ -194,7 +198,7 @@ class KbService:
 
                 raise HTTPException(400, "KB referenced by agent(s). Unbind first.")
             # Delete Qdrant
-            await self.qdrant.delete_collection(kb_id)
+            require_delete_outcome(await self.qdrant.delete_collection(kb_id))
             # Delete chunks + docs
             await session.execute(
                 sa_delete(KbChunk).where(
@@ -206,15 +210,19 @@ class KbService:
                     KbDocument.kb_id == kb_id, KbDocument.tenant_id == tenant_id
                 )
             )
-            # Physical files
-            import shutil
-
             upload_dir = Path("/app/data/kb_uploads") / tenant_id / kb_id
-            if upload_dir.exists():
-                shutil.rmtree(upload_dir, ignore_errors=True)
             # Delete KB
             await session.delete(kb)
-            await session.commit()
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+            if upload_dir.exists():
+                import shutil
+
+                shutil.rmtree(upload_dir)
 
     async def reset_knowledge_base(
         self,
@@ -270,7 +278,7 @@ class KbService:
 
         try:
             # 1. Delete Qdrant collection (idempotent)
-            await self.qdrant.delete_collection(kb_id)
+            require_delete_outcome(await self.qdrant.delete_collection(kb_id))
 
             # 2. Recreate with new model
             await self.qdrant.ensure_collection(kb_id, new_model)

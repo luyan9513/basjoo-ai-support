@@ -10,8 +10,9 @@ aiosqlite==0.20.0
 
 # 认证和安全
 python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-bcrypt==4.0.1  # 固定版本，bcrypt>=4.1.0与passlib不兼容
+pwdlib==0.3.0
+argon2-cffi==25.1.0
+bcrypt==5.0.0
 python-dotenv==1.0.1
 
 # OpenAI API
@@ -46,7 +47,7 @@ pydantic-settings==2.6.0
 apscheduler==3.10.4
 
 # Qdrant 向量数据库客户端
-qdrant-client==1.13.3
+qdrant-client==1.18.0
 
 # 文档解析
 pdfplumber==0.11.0

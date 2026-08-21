@@ -36,9 +36,6 @@ def _check_login_rate_limit(
     history = _login_attempt_history[ip]
     while history and now - history[0] >= window_seconds:
         history.popleft()
-    if not history:
-        _login_attempt_history.pop(ip, None)
-        return True, 0
     if len(history) >= max_attempts:
         retry_after = int(window_seconds - (now - history[0])) + 1
         return False, max(retry_after, 1)

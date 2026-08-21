@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from .scraper import URLScraper
 from models import normalize_url
+from services.url_safety import url_log_reference
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,8 @@ class SiteCrawler:
             爬取结果列表
         """
         logger.info(
-            f"[SiteCrawler] crawl_site called with url={url}, depth={max_depth}, pages={max_pages}"
+            "[SiteCrawler] crawl_site called with %s, depth=%s, pages=%s",
+            url_log_reference(url), max_depth, max_pages,
         )
 
         if include_external:
@@ -117,7 +119,10 @@ class SiteCrawler:
                     if len(candidate_urls) >= max_pages:
                         break
             except Exception as e:
-                logger.warning(f"[SiteCrawler] Failed to discover subpages for {url}: {e}")
+                logger.warning(
+                    "[SiteCrawler] Failed to discover subpages for %s: %s",
+                    url_log_reference(url), type(e).__name__,
+                )
 
         results: List[CrawlPageResult] = []
 
@@ -133,15 +138,18 @@ class SiteCrawler:
 
             if page_result.success:
                 logger.info(
-                    f"[SiteCrawler] Processed page: {page_result.url}, title={page_result.title[:50] if page_result.title else 'N/A'}, content_length={len(page_result.content)}"
+                    "[SiteCrawler] Processed page %s, content_length=%s",
+                    url_log_reference(page_result.url), len(page_result.content),
                 )
             else:
                 logger.warning(
-                    f"[SiteCrawler] Failed to process page {page_url}: {page_result.error}"
+                    "[SiteCrawler] Failed to process page %s",
+                    url_log_reference(page_url),
                 )
 
         logger.info(
-            f"[SiteCrawler] Site crawl completed: {len(results)} pages crawled from {url}"
+            "[SiteCrawler] Site crawl completed: %s pages crawled from %s",
+            len(results), url_log_reference(url),
         )
         return results
 
